@@ -127,8 +127,7 @@ class RaritanLegacyBackend(Backend):
             session.connect_port(self.port, compression_params=SCREENSHOT_COMPRESSION_PARAMS)
             png = grabber.grab(timeout=SNAPSHOT_TIMEOUT)
 
-        mode = grabber.frame.mode
-        return Snapshot("png", png, mode.width, mode.height)
+        return Snapshot("png", png, grabber.mode.width, grabber.mode.height)
 
     def type_text(self, text: str) -> None:
         with self._switch_errors():

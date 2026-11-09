@@ -211,7 +211,7 @@ class FakeGrabber:
 
     def __init__(self, session):
         self.session = session
-        self.frame = None
+        self.mode = None
 
     def handle_video_packet(self, packet):
         pass
@@ -221,7 +221,7 @@ class FakeGrabber:
         mode = screen.VideoMode(flags=0, colour_table=12, cell_width=16, cell_height=16,
                                 cell_count=0, width=800, height=600, buffer_width=800,
                                 buffer_height=608, device_id=7)
-        self.frame = screen.FrameBuffer(mode)
+        self.mode = mode
         return b"\x89PNG grabbed"
 
 

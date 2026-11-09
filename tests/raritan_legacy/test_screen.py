@@ -4,12 +4,12 @@
 
 """Screenshot decoding, on synthetic packets.
 
-No real video has been captured from a switch yet, so these packets are
-built to the layout Raritan's client expects.  They check the decoding
-logic, not that the layout is right.
+The packets are built to the layout Raritan's client expects and a real
+switch sends, and the packet sequences follow what a real switch did.
 """
 
 import struct
+import time
 import zlib
 
 import pytest
@@ -48,6 +48,13 @@ def cell_data(cells, compressed=False):
         flags = screen.CELL_FLAG_LZO
     header = struct.pack(">HBB", len(cells), 0, flags)
     return packets.pack_command(packets.RSP_CELL_DATA, header + payload)
+
+
+def notify(event, parameter):
+    return packets.pack_command(packets.RSP_NOTIFY, struct.pack(">IIB", event, parameter, 0))
+
+
+SYNC_LOST = notify(packets.NOTIFY_AUTOSENSE, packets.AUTOSENSE_STARTED)
 
 
 def decode_png(data):
@@ -161,7 +168,7 @@ class FakeSession:
 
 def test_grabber_builds_a_frame_from_video_packets():
     session = FakeSession()
-    grabber = screen.ScreenGrabber(session)
+    grabber = screen.ScreenGrabber(session, settle_time=0)
     grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
     assert session.refreshes == 1  # a new mode asks for a full repaint
     grabber.handle_video_packet(cell_data([cell(0, RED), cell(1, RED)]))
@@ -184,3 +191,94 @@ def test_grabber_reports_decoding_errors():
     grabber.handle_video_packet(new_video_mode(8, 4, 8, 4, colour_table=8))
     with pytest.raises(screen.ScreenError, match="decoding failed"):
         grabber.grab(timeout=1)
+
+
+def red_frame():
+    return cell_data([cell(0, RED), cell(1, RED)])
+
+
+def first_row_colour(png):
+    _width, _height, rows = decode_png(png)
+    return tuple(rows[0][:3])
+
+
+def test_grabber_keeps_the_first_complete_frame():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(red_frame())
+    # The black screen the switch sends as it loses sync.
+    grabber.handle_video_packet(cell_data([cell(0, 0), cell(1, 0)]))
+
+    assert first_row_colour(grabber.grab(timeout=1)) == (255, 0, 0)
+    assert (grabber.mode.width, grabber.mode.height) == (8, 4)
+
+
+def test_losing_sync_discards_an_unsettled_frame():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0.3)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(cell_data([cell(0, 0), cell(1, 0)]))
+    grabber.handle_video_packet(SYNC_LOST)
+    assert grabber.candidate is None
+
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(cell_data([cell(0, GREEN), cell(1, GREEN)]))
+    assert first_row_colour(grabber.grab(timeout=2)) == (0, 255, 0)
+
+
+def test_a_settled_frame_survives_losing_sync_later():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0.05)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(red_frame())
+    time.sleep(0.1)
+    grabber.handle_video_packet(SYNC_LOST)
+    assert first_row_colour(grabber.grab(timeout=1)) == (255, 0, 0)
+
+
+def test_cells_between_losing_sync_and_the_next_mode_are_ignored():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(SYNC_LOST)
+    grabber.handle_video_packet(red_frame())
+    assert grabber.frame is None
+    assert grabber.candidate is None
+    assert grabber.error is None
+
+
+def test_other_notifications_change_nothing():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=10)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(red_frame())
+    grabber.handle_video_packet(notify(packets.NOTIFY_AUTOSENSE, 5))
+    grabber.handle_video_packet(notify(packets.NOTIFY_AUTOSENSE, packets.AUTOSENSE_DONE))
+    assert grabber.candidate is not None
+
+
+def test_an_unsettled_frame_is_returned_when_time_runs_out():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=10)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(red_frame())
+    assert first_row_colour(grabber.grab(timeout=0.3)) == (255, 0, 0)
+
+
+def test_an_incomplete_frame_is_not_returned():
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(cell_data([cell(0, RED)]))
+    with pytest.raises(screen.ScreenError, match="may not lock onto this video mode"):
+        grabber.grab(timeout=0.3)
+
+
+def test_a_switch_losing_sync_as_a_real_one_does():
+    # What a Dominion KX sent for a screen it struggled to lock onto: the
+    # screen, the screen again, a whole screen of black cells, then a
+    # restart of its autosense.
+    grabber = screen.ScreenGrabber(FakeSession(), settle_time=0)
+    grabber.handle_video_packet(new_video_mode(8, 4, 8, 4))
+    grabber.handle_video_packet(cell_data([cell(0, WHITE), cell(1, BLUE)]))
+    grabber.handle_video_packet(cell_data([cell(0, WHITE), cell(1, BLUE)]))
+    grabber.handle_video_packet(cell_data([cell(0, 0), cell(1, 0)]))
+    grabber.handle_video_packet(SYNC_LOST)
+
+    _width, _height, rows = decode_png(grabber.grab(timeout=1))
+    assert rows[0][:3] == bytes((255, 255, 255))
+    assert rows[0][-3:] == bytes((0, 0, 255))

@@ -291,7 +291,8 @@ class KXSession:
         self._autosense_done = threading.Event()
         self.no_video = False
 
-        # Called from the reader thread with every video packet, when set.
+        # Called from the reader thread with every video packet and every
+        # notification, when set.
         self.video_listener = None
 
     # ------------------------------------------------------------------
@@ -504,6 +505,10 @@ class KXSession:
             self._autosense_done.set()
         elif event == packets.NOTIFY_NO_VIDEO:
             self.no_video = parameter != 0
+
+        # The video listener needs to know when the switch loses sync.
+        if self.video_listener is not None:
+            self.video_listener(packet)
 
     def _fail_waiters(self, error: Exception) -> None:
         with self._waiting_lock:

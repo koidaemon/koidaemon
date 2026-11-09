@@ -62,10 +62,12 @@ RSP_HANDSHAKE_ACK = 43      # only during the handshake
 RSP_NOTIFY = 43             # after login: event notifications
 
 # NOTIFY events.  After a port is connected the switch "autosenses" the
-# video, reporting progress as NOTIFY_AUTOSENSE with an increasing
+# video: AUTOSENSE_STARTED, progress as NOTIFY_AUTOSENSE with an increasing
 # parameter, then AUTOSENSE_DONE.  Key presses sent before that are lost.
+# The switch starts again whenever it loses sync with the video.
 NOTIFY_AUTOSENSE = 0
 NOTIFY_NO_VIDEO = 3
+AUTOSENSE_STARTED = 0xFFFFFFFE
 AUTOSENSE_DONE = 0xFFFFFFFF
 
 DATABASE_RESPONSE_HEADER_SIZE = 18

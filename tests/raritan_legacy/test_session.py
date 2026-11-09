@@ -216,3 +216,14 @@ def test_too_many_sessions_fails_at_once_without_a_wait():
             pass
         check(fake)
     assert fake.login_attempts == 2
+
+
+def test_notifications_reach_the_video_listener():
+    commands_seen = []
+    with FakeKX() as fake:
+        with open_session(fake) as session:
+            session.video_listener = lambda packet: commands_seen.append(packet[2])
+            session.connect_port(1)
+        check(fake)
+    # The fake switch reports its autosense after connecting.
+    assert packets.RSP_NOTIFY in commands_seen

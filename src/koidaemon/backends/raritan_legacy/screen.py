@@ -4,15 +4,12 @@
 
 """Screenshots from the switch's video stream.
 
-UNTESTED ON REAL VIDEO.  This follows how Raritan's client decodes video,
-but no video source has been connected to the switch while writing it, so
-expect to adjust it once one is.
+Tested against a real switch, which produced readable screenshots of a
+Linux text console and of test patterns.  How the stream works:
 
-How the stream works:
-
-  * after connecting to a port the switch sends NEW_VIDEO_MODE, giving the
-    screen size, the size of the cells the screen is cut into, and the
-    pixel format ("colour table", CCT);
+  * after connecting to a port the switch "autosenses" the video, then
+    sends NEW_VIDEO_MODE, giving the screen size, the size of the cells the
+    screen is cut into, and the pixel format ("colour table", CCT);
   * screen content then arrives as CELL_DATA packets.  Each carries a
     number of cells, usually LZO1X-compressed.  Every cell starts with an
     8-byte header (bytes 2-3 are the cell index), followed by its pixels
@@ -21,8 +18,14 @@ How the stream works:
   * VIDEO_MARKER packets must be echoed back as VIDEO_SYNC (the session does
     that) or the switch stops sending.
 
-There is no end-of-frame marker, so a screenshot is complete once every
-cell has been received at least once.
+There is no end-of-frame marker, so a frame is complete once every cell has
+been received at least once.
+
+The switch can lose sync with a signal it struggles with.  When it does, it
+first sends a whole screen of black cells, then starts autosensing again
+and sends a new NEW_VIDEO_MODE.  So a screenshot is the first complete
+frame after a video mode, once it has gone SETTLE_TIME without the switch
+starting over.
 """
 
 from __future__ import annotations
@@ -212,68 +215,107 @@ def encode_png(width: int, height: int, filtered_rows: bytes) -> bytes:
             + _png_chunk(b"IEND", b""))
 
 
-class ScreenGrabber:
-    """Collects video packets from a session until a whole frame is in."""
+# How long a complete frame must go without the switch restarting its
+# autosense before it is trusted.  On a real switch, losing sync came
+# seconds after a good frame, never within a second.
+SETTLE_TIME = 1.0
 
-    def __init__(self, session) -> None:
+
+class ScreenGrabber:
+    """Collects video packets from a session and keeps the first whole frame.
+
+    Pass handle_video_packet as the session's video_listener before
+    connecting to the port, then call grab().
+    """
+
+    def __init__(self, session, settle_time: float = SETTLE_TIME) -> None:
         self.session = session
+        self.settle_time = settle_time
         self.frame: FrameBuffer | None = None
         self.error: Exception | None = None
+        # The first complete frame since the latest video mode: its PNG, its
+        # mode and when it completed.
+        self.candidate: tuple[bytes, VideoMode, float] | None = None
+        # The mode of the frame grab() returned.
+        self.mode: VideoMode | None = None
         self._changed = threading.Condition()
 
     def handle_video_packet(self, packet: bytes) -> None:
-        """Called by the session's reader thread for every video packet."""
+        """Called by the session's reader thread for video and notifications."""
         try:
             command = packet[2]
             if command == packets.RSP_NEW_VIDEO_MODE:
-                mode = VideoMode.parse(packet)
-                if self.frame is not None and mode.flags & VIDEO_FLAG_PUBLIC_VIEW_UPDATE:
-                    return
-                LOG.info("video mode %dx%d, cells %dx%d, colour table %d",
-                         mode.width, mode.height, mode.cell_width, mode.cell_height,
-                         mode.colour_table)
-                self.frame = FrameBuffer(mode)
-                # A new mode means a new screen: ask for all of it.
-                self.session.request_refresh()
+                self._new_video_mode(packet)
             elif command == packets.RSP_CELL_DATA and self.frame is not None:
-                self.frame.apply_cell_data(packet)
+                self._cell_data(packet)
+            elif command == packets.RSP_NOTIFY:
+                self._notify(packet)
         except Exception as error:
             self.error = error
         with self._changed:
             self._changed.notify_all()
 
-    def grab(self, timeout: float = 30.0, quiet_time: float = 2.0) -> bytes:
-        """Wait for a full frame and return it as a PNG.
+    def _new_video_mode(self, packet: bytes) -> None:
+        mode = VideoMode.parse(packet)
+        if self.frame is not None and mode.flags & VIDEO_FLAG_PUBLIC_VIEW_UPDATE:
+            return
+        LOG.info("video mode %dx%d, cells %dx%d, colour table %d",
+                 mode.width, mode.height, mode.cell_width, mode.cell_height,
+                 mode.colour_table)
+        self.frame = FrameBuffer(mode)
+        self.candidate = None
+        # A new mode means a new screen: ask for all of it.
+        self.session.request_refresh()
 
-        If cells stop arriving for quiet_time seconds before the frame is
-        complete, return what we have (missing cells are black).
+    def _cell_data(self, packet: bytes) -> None:
+        self.frame.apply_cell_data(packet)
+        # Keep the first complete frame.  Later cells can be the black
+        # screen the switch sends as it loses sync.
+        if self.candidate is None and self.frame.complete:
+            self.candidate = (self.frame.to_png(), self.frame.mode, time.monotonic())
+
+    def _notify(self, packet: bytes) -> None:
+        event, parameter = struct.unpack(">II", packet[4:12])
+        if event != packets.NOTIFY_AUTOSENSE or parameter != packets.AUTOSENSE_STARTED:
+            return
+        # The switch lost sync.  A frame that completed only just before
+        # may already be the black screen it sends first.
+        if self.candidate is not None and not self._settled(self.candidate):
+            LOG.info("the switch lost sync; waiting for the next frame")
+            self.candidate = None
+        # Cells sent before the next video mode belong to no frame.
+        self.frame = None
+
+    def _settled(self, candidate: tuple[bytes, VideoMode, float]) -> bool:
+        _png, _mode, completed = candidate
+        return time.monotonic() - completed >= self.settle_time
+
+    def grab(self, timeout: float = 30.0) -> bytes:
+        """Wait for a whole frame that has settled and return it as a PNG.
+
+        If the time runs out with a complete frame that has not settled,
+        that frame is returned anyway.
         """
         self.session.request_refresh()
         deadline = time.monotonic() + timeout
-        last_count = -1
-        last_change = time.monotonic()
 
         with self._changed:
             while True:
                 if self.error is not None:
                     raise ScreenError("video decoding failed: %s" % self.error)
-                frame = self.frame
-                if frame is not None and frame.complete:
-                    break
 
-                now = time.monotonic()
-                count = len(frame.cells_seen) if frame is not None else 0
-                if count != last_count:
-                    last_count = count
-                    last_change = now
-                elif frame is not None and count > 0 and now - last_change > quiet_time:
-                    LOG.warning("frame incomplete: %d of %d cells", count,
-                                frame.mode.total_cells)
+                candidate = self.candidate
+                if candidate is not None and self._settled(candidate):
                     break
-                if now > deadline:
+                if time.monotonic() > deadline:
+                    if candidate is not None:
+                        LOG.warning("returning a frame that had not settled")
+                        break
                     if self.session.no_video:
                         raise ScreenError("the port has no video signal")
-                    raise ScreenError("no complete frame after %.0f s" % timeout)
+                    raise ScreenError("no complete frame after %.0f s; the switch may not "
+                                      "lock onto this video mode" % timeout)
                 self._changed.wait(0.2)
 
-        return self.frame.to_png()
+        png, self.mode, _completed = candidate
+        return png
