@@ -1,0 +1,21 @@
+# koid configuration: one [targets.NAME] table per machine.
+
+[daemon]
+socket = "/run/koidaemon/koid.sock"
+socket_mode = "0660"
+# socket_group = "lava"
+
+# Port 1 of a first-generation Raritan Dominion KX switch.
+[targets.board-a]
+backend = "raritan-legacy"
+host = "192.0.2.10"
+port = 1
+password_file = "/run/secrets/raritan"
+wait = 30
+
+# A board behind a PiKVM.
+[targets.board-b]
+backend = "pikvm"
+url = "https://192.0.2.20"
+password_file = "/run/secrets/pikvm-b"
+ca_file = "pikvm-b.pem"
