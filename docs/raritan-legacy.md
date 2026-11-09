@@ -13,7 +13,7 @@ target port, and Linux on the target.
 |---|---|
 | Keyboard | yes (PS/2 scan codes, or HID usages if the switch asks for them) |
 | Mouse | yes, absolute pixels |
-| Snapshot | PNG; **untested**: no video source has been connected yet |
+| Snapshot | PNG; tested at 640x480 and 800x600 (see [Video](#video)) |
 | USB storage | no: these switches cannot emulate it |
 
 ## Configuration
@@ -45,6 +45,41 @@ switch at the same time are handled by `wait`.
 
 `keyboard.down` and `keyboard.up` each run in a session of their own;
 whether the switch keeps a key held between sessions has not been tested.
+
+## Video
+
+The switch digitises VGA. Raritan's user guide lists the modes it
+supports, none of them widescreen, up to 1280x1024:
+
+| Resolution | Refresh rates (Hz) |
+|---|---|
+| 640x480 | 60, 72, 75, 85 |
+| 720x400 | 70, 85 |
+| 800x600 | 56, 60, 72, 75, 85 |
+| 1024x768 | 60, 70, 75, 77, 85 |
+| 1152x864 | 60, 70, 75 |
+| 1152x900 | 66 |
+| 1280x960, 1280x1024 | 60 |
+
+Found with a board whose HDMI output went through an HDMI-to-VGA adapter:
+
+- **640x480 and 800x600 worked.** The switch could not lock onto the
+  adapter's 1024x768 at 60 Hz, although that mode is on the list. On Linux,
+  `video=HDMI-A-1:800x600@60` on the kernel command line picks a mode.
+- **The switch needs something on the screen to lock onto.** A screen that
+  is almost entirely black, such as an idle text console, or a smooth
+  gradient never locked; text or a test pattern locked within seconds.
+  Raritan recommends a "predominantly solid, plain, light-colored"
+  desktop background.
+- **The switch can lose sync and start again.** When it does, it first
+  sends a whole black screen. A snapshot is therefore the first complete
+  frame after the switch locks, once a second has passed without it losing
+  sync, which skips the black or half-drawn frames sent at that moment.
+- **Brightness varies.** The switch adjusts its own gain: the same grey
+  came back at different levels on different connections.
+
+`snapshot` fails with "the port has no video signal" or "no complete
+frame" when the switch cannot lock.
 
 ## Behaviour of the hardware
 
@@ -78,6 +113,8 @@ Found while testing against a real switch; the code works around each one.
   and also retried for `wait` seconds.
 - **The CIM is powered by the target**, so a port shows no target
   (`"online": false`) while the machine is off.
+- **The CIM appears to keep a name of its own** for its port: a name set
+  on the switch was replaced by the old one once the target powered up.
 - **Mouse positions are absolute screen pixels.** On connect the switch
   drives the pointer into the top-left corner, then replays the last
   position it set.

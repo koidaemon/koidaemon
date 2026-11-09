@@ -22,8 +22,10 @@ The name is short for **K**VM **o**ver **I**P.
 What has been tested on real hardware so far:
 
 - **raritan-legacy:** keyboard and mouse, on a Dominion KX with firmware
-  1.4.9.5.16 and a DCIM-USBG2. Snapshots follow Raritan's own client but
-  have not yet been tried with a video signal.
+  1.4.9.5.16 and a DCIM-USBG2; snapshots of a Linux text console and of
+  test patterns at 640x480 and 800x600. These switches handle no
+  widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
+  for the resolutions that work.
 - **pikvm:** written from kvmd's source and tested against a fake kvmd;
   not yet run against a PiKVM.
 
