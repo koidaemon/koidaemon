@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import datetime
+import io
 import ipaddress
 import pathlib
 import tempfile
@@ -15,11 +16,24 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from PIL import Image
 
 from koidaemon import commands
 from koidaemon.backends.base import Backend, Snapshot
 
-FAKE_PNG = b"\x89PNG\r\n\x1a\nfake"
+def make_picture(width: int, height: int, picture_format: str = "PNG") -> bytes:
+    """A picture with something on it: a gradient with a block of white."""
+    picture = Image.new("RGB", (width, height))
+    for x in range(width):
+        for y in range(height):
+            picture.putpixel((x, y), (x * 255 // width, y * 255 // height, 64))
+    picture.paste((255, 255, 255), (width // 4, height // 4, width // 2, height // 2))
+    output = io.BytesIO()
+    picture.save(output, picture_format)
+    return output.getvalue()
+
+
+FAKE_PNG = make_picture(64, 48)
 
 
 class RecordingBackend(Backend):
@@ -49,7 +63,7 @@ class RecordingBackend(Backend):
 
     def snapshot(self) -> Snapshot:
         self._record("snapshot")
-        return Snapshot("png", FAKE_PNG, 640, 480)
+        return Snapshot("png", FAKE_PNG, 64, 48)
 
     def type_text(self, text):
         self._record("type_text", text)

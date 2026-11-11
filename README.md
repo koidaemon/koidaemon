@@ -16,7 +16,7 @@ or a serial line, are meant to be supported too.
 
 ## Backends
 
-| Backend | Devices | Keyboard | Mouse | Snapshot | USB stick | USB CD |
+| Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
@@ -41,8 +41,8 @@ python3 -m venv .venv
 .venv/bin/pip install .
 ```
 
-The only dependency is `cryptography`, for the raritan-legacy backend's
-SSL 3.0 handshake.
+It needs `cryptography`, for the raritan-legacy backend's SSL 3.0
+handshake, and Pillow, to convert snapshots between formats.
 
 ## Configure
 
@@ -99,6 +99,7 @@ koictl keyboard press ctrl+alt+delete
 koictl mouse click --at 640 400 --count 2
 koictl mouse scroll -3
 koictl snapshot screen.png
+koictl snapshot --format jpeg screen.jpg
 koictl storage insert --cdrom installer.iso
 koictl storage eject
 ```
@@ -125,7 +126,7 @@ the details.
 | Command | Does |
 |---|---|
 | `status` | whether the target is reachable, its video, and what it can do |
-| `snapshot` | a picture of the screen |
+| `snapshot` | a picture of the screen, PNG unless asked for JPEG or the KVM's own format |
 | `keyboard.type` | type text |
 | `keyboard.press` | press and release keys or combinations, in order |
 | `keyboard.down`, `keyboard.up` | hold and release a key |

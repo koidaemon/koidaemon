@@ -125,7 +125,9 @@ class Client:
     def targets(self) -> dict:
         return self.call("targets")["targets"]
 
-    def snapshot(self, target: str) -> Snapshot:
-        result = self.call("snapshot", target)
+    def snapshot(self, target: str, format: str = "png") -> Snapshot:
+        """A picture of the screen: png, jpeg, or native for whatever the
+        KVM sends."""
+        result = self.call("snapshot", target, format=format)
         data = base64.b64decode(result["data"])
         return Snapshot(result["format"], data, result.get("width"), result.get("height"))

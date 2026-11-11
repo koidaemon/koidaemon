@@ -33,6 +33,7 @@ ALL_CAPABILITIES = (SNAPSHOT, KEYBOARD, MOUSE, STORAGE_STICK, STORAGE_CDROM)
 # Not a capability of its own: commands that work with either kind of drive.
 ANY_STORAGE = "storage"
 
+SNAPSHOT_FORMATS = ("png", "jpeg", "native")
 MOUSE_BUTTONS = ("left", "right", "middle")
 STORAGE_MODES = ("stick", "cdrom")
 MAX_CLICKS = 10
@@ -64,7 +65,10 @@ _BUTTON = Argument("button", str, "mouse button", default="left", choices=MOUSE_
 
 COMMANDS = {command.name: command for command in (
     Command("status", "whether the target is reachable, and what it can do", None),
-    Command("snapshot", "a picture of the target's screen", SNAPSHOT),
+    Command("snapshot", "a picture of the target's screen", SNAPSHOT, (
+        Argument("format", str, "png, jpeg, or native for whatever the KVM sends",
+                 default="png", choices=SNAPSHOT_FORMATS),
+    )),
 
     Command("keyboard.type", "type text (US layout)", KEYBOARD, (
         Argument("text", str, "the text, taken literally; \\n is Enter", required=True),

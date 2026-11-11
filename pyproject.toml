@@ -11,8 +11,8 @@ license = { text = "MIT" }
 authors = [{ name = "Matt H", email = "code@mattface.org" }]
 requires-python = ">=3.11"
 # cryptography does the RSA step of the raritan-legacy backend's SSL 3.0
-# handshake; everything else uses only the standard library.
-dependencies = ["cryptography"]
+# handshake, and Pillow converts snapshots between formats.
+dependencies = ["cryptography", "pillow"]
 
 [project.optional-dependencies]
 test = ["pytest"]

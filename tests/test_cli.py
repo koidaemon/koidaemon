@@ -109,7 +109,27 @@ def test_snapshot_to_a_file(socket_path, tmp_path, capsys):
     output = tmp_path / "screen.png"
     assert koictl(socket_path, "snapshot", str(output)) == 0
     assert output.read_bytes() == FAKE_PNG
-    assert capsys.readouterr().err == "saved png 640x480 to %s\n" % output
+    assert capsys.readouterr().err == "saved png 64x48 to %s\n" % output
+
+
+@pytest.mark.parametrize("name, start", [
+    ("screen.jpg", b"\xff\xd8"),
+    ("screen.JPEG", b"\xff\xd8"),
+    ("screen.png", b"\x89PNG"),
+    ("screen", b"\x89PNG"),
+    ("screen.bmp", b"\x89PNG"),
+])
+def test_snapshot_format_from_the_file_name(socket_path, tmp_path, name, start):
+    output = tmp_path / name
+    assert koictl(socket_path, "snapshot", str(output)) == 0
+    assert output.read_bytes().startswith(start)
+
+
+def test_snapshot_format_chosen(socket_path, tmp_path, capsys):
+    output = tmp_path / "screen.png"
+    assert koictl(socket_path, "snapshot", "--format", "jpeg", str(output)) == 0
+    assert output.read_bytes().startswith(b"\xff\xd8")
+    assert capsys.readouterr().err.startswith("saved jpeg 64x48")
 
 
 def test_snapshot_to_standard_output(socket_path, capsysbinary):

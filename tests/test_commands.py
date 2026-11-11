@@ -15,10 +15,11 @@ def test_defaults_are_filled_in():
     assert commands.validate("storage.insert", {"image": "/images/a.img"}) == {
         "image": "/images/a.img", "mode": "stick", "writable": False,
     }
+    assert commands.validate("snapshot", None) == {"format": "png"}
 
 
 def test_commands_without_arguments():
-    for name in ("status", "snapshot", "storage.eject", "storage.status"):
+    for name in ("status", "storage.eject", "storage.status"):
         assert commands.validate(name, None) == {}
 
 

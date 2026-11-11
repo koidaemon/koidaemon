@@ -76,14 +76,23 @@ connecting. Backends may add fields of their own (raritan-legacy adds
 
 ### snapshot
 
-Needs `snapshot`. Returns the screen:
+Needs `snapshot`.
+
+| Argument | Type | |
+|---|---|---|
+| `format` | string | `png` (the default), `jpeg`, or `native` for whatever the KVM sends |
+
+Returns the screen:
 
 ```json
-{"format": "jpeg", "width": 1920, "height": 1080, "data": "<base64>"}
+{"format": "png", "width": 1920, "height": 1080, "data": "<base64>"}
 ```
 
-`format` is `png` or `jpeg`, depending on the KVM; `width` and `height`
-can be null if the picture does not say.
+koid converts the picture when the KVM sends another format (a PiKVM
+sends JPEG), so clients get PNG whatever the KVM. Converting JPEG to PNG
+keeps JPEG's losses; it only changes the file format. With `native`,
+`format` says which the KVM sent, `png` or `jpeg`, and `width` and
+`height` can be null if the picture does not say.
 
 ### keyboard.type
 

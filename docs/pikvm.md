@@ -9,7 +9,7 @@ checked from the board as a stick and from the PiKVM as a CD.
 |---|---|
 | Keyboard | yes |
 | Mouse | yes, absolute pixels |
-| Snapshot | JPEG |
+| Snapshot | yes; the PiKVM sends JPEG, which koid turns into PNG unless asked not to |
 | USB storage | yes, as a stick or a CD drive |
 
 ## Configuration

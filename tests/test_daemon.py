@@ -15,6 +15,7 @@ import time
 import pytest
 
 from koidaemon import commands, keys
+from koidaemon.backends.base import Snapshot
 from koidaemon.client import Client
 from koidaemon.daemon import MAX_REQUEST, Daemon
 from koidaemon.errors import BackendError, Busy, KoiError, UnknownTarget, Unsupported
@@ -77,8 +78,27 @@ def test_status_adds_capabilities(daemon):
 def test_snapshot_is_base64(daemon):
     result = daemon.handle(request("snapshot"))["result"]
     assert result["format"] == "png"
-    assert (result["width"], result["height"]) == (640, 480)
+    assert (result["width"], result["height"]) == (64, 48)
     assert base64.b64decode(result["data"]) == FAKE_PNG
+
+
+def test_snapshot_converted_to_jpeg(daemon):
+    result = daemon.handle(request("snapshot", format="jpeg"))["result"]
+    assert result["format"] == "jpeg"
+    assert (result["width"], result["height"]) == (64, 48)
+    assert base64.b64decode(result["data"]).startswith(b"\xff\xd8")
+
+
+def test_snapshot_in_the_kvms_own_format(daemon, backend, monkeypatch):
+    monkeypatch.setattr(backend, "snapshot", lambda: Snapshot("jpeg", b"as sent", 1, 1))
+    result = daemon.handle(request("snapshot", format="native"))["result"]
+    assert result["format"] == "jpeg"
+    assert base64.b64decode(result["data"]) == b"as sent"
+
+
+def test_snapshot_in_an_unknown_format(daemon):
+    reply = daemon.handle(request("snapshot", format="gif"))
+    assert reply["error"]["code"] == "invalid"
 
 
 def test_storage_insert_and_status(daemon, backend):

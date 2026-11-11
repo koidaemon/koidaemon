@@ -22,11 +22,15 @@ import threading
 
 from koidaemon import __version__, config
 from koidaemon.client import Client
+from koidaemon.commands import SNAPSHOT_FORMATS
 from koidaemon.daemon import Daemon
 from koidaemon.errors import ConfigError, KoiError, Unsupported
 from koidaemon.httpapi import HTTPApi
 
 LOG = logging.getLogger("koidaemon")
+
+# Snapshot formats picked from the output file's name.
+EXTENSION_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
 
 EXIT_FAILED = 1
 EXIT_UNSUPPORTED = 3
@@ -154,6 +158,9 @@ def _koictl_parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="whether the target is reachable, and what it can do")
     snapshot = commands.add_parser("snapshot", help="save a picture of the screen")
     snapshot.add_argument("output", help='file to write, or "-" for standard output')
+    snapshot.add_argument("--format", choices=SNAPSHOT_FORMATS,
+                          help="png, jpeg, or native for whatever the KVM sends; by default "
+                               "taken from the file name's extension, otherwise png")
 
     keyboard = commands.add_parser("keyboard", help="type and press keys")
     keyboard_actions = keyboard.add_subparsers(dest="action", required=True)
@@ -228,8 +235,16 @@ def _request(args: argparse.Namespace) -> tuple[str, dict]:
     return name, {}
 
 
-def _save_snapshot(client: Client, target: str, output: str) -> None:
-    snapshot = client.snapshot(target)
+def _snapshot_format(output: str, chosen: str | None) -> str:
+    """The format asked for, or the one the output file's name suggests."""
+    if chosen is not None:
+        return chosen
+    extension = os.path.splitext(output)[1].lower()
+    return EXTENSION_FORMATS.get(extension, "png")
+
+
+def _save_snapshot(client: Client, target: str, output: str, chosen: str | None) -> None:
+    snapshot = client.snapshot(target, _snapshot_format(output, chosen))
     if output == "-":
         sys.stdout.buffer.write(snapshot.data)
         return
@@ -262,7 +277,7 @@ def koictl_main(argv: list[str] | None = None) -> int:
     target = None if name == "targets" else args.target
     try:
         if name == "snapshot":
-            _save_snapshot(client, target, args.output)
+            _save_snapshot(client, target, args.output, args.format)
             return 0
         result = client.call(name, target, **request)
     except Unsupported as error:

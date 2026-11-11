@@ -13,7 +13,7 @@ target port, and Linux on the target.
 |---|---|
 | Keyboard | yes (PS/2 scan codes, or HID usages if the switch asks for them) |
 | Mouse | yes, absolute pixels |
-| Snapshot | PNG; tested at 640x480 and 800x600 (see [Video](#video)) |
+| Snapshot | yes, as PNG; tested at 640x480 and 800x600 (see [Video](#video)) |
 | USB storage | no: these switches cannot emulate it |
 
 ## Configuration

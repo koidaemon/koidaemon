@@ -29,7 +29,7 @@ import socket
 import socketserver
 import threading
 
-from koidaemon import commands
+from koidaemon import commands, images
 from koidaemon.backends.base import Backend
 from koidaemon.errors import InvalidRequest, KoiError, UnknownTarget, Unsupported
 
@@ -104,7 +104,7 @@ class Daemon:
             status["capabilities"] = sorted(backend.capabilities)
             return status
         if name == "snapshot":
-            snapshot = backend.snapshot()
+            snapshot = images.convert(backend.snapshot(), args["format"])
             return {
                 "format": snapshot.format,
                 "width": snapshot.width,
