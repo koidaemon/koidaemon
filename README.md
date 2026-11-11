@@ -10,7 +10,8 @@ that needs to type into a machine it cannot otherwise reach.
 - **`koictl`** is the command line client; `koidaemon.client` is the same
   for Python.
 
-The name is short for **K**VM **o**ver **I**P.
+The name is short for **K**VM **o**ver **I**P, and is said *koi*, like
+the fish.
 
 ## Backends
 
