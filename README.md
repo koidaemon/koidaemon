@@ -53,7 +53,7 @@ koid reads `/etc/koidaemon/koid.toml` (or the file given with `-c`). Each
 [daemon]
 socket = "/run/koidaemon/koid.sock"    # default
 socket_mode = "0660"                   # default
-socket_group = "lava"                  # optional: who may use koid
+socket_group = "koid"                  # optional: who may use koid
 
 [targets.board-a]
 backend = "raritan-legacy"

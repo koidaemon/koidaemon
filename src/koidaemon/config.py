@@ -10,7 +10,7 @@ per machine:
     [daemon]
     socket = "/run/koidaemon/koid.sock"     # default
     socket_mode = "0660"                    # default
-    socket_group = "lava"                   # optional
+    socket_group = "koid"                   # optional
 
     [http]                                  # optional; see httpapi.py
     enabled = false                         # default

@@ -3,7 +3,7 @@
 [daemon]
 socket = "/run/koidaemon/koid.sock"
 socket_mode = "0660"
-# socket_group = "lava"
+# socket_group = "koid"
 
 # Port 1 of a first-generation Raritan Dominion KX switch.
 [targets.board-a]

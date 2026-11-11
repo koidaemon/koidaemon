@@ -61,12 +61,12 @@ def test_daemon_settings(tmp_path):
     [daemon]
     socket = "/tmp/koid-test.sock"
     socket_mode = "0600"
-    socket_group = "lava"
+    socket_group = "koid"
     """ + RARITAN
     loaded = config.load(write_config(tmp_path, text))
     assert loaded.socket == pathlib.Path("/tmp/koid-test.sock")
     assert loaded.socket_mode == 0o600
-    assert loaded.socket_group == "lava"
+    assert loaded.socket_group == "koid"
 
 
 def test_relative_socket_path(tmp_path):
