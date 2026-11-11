@@ -11,7 +11,8 @@ that needs to type into a machine it cannot otherwise reach.
   for Python.
 
 The name is short for **K**VM **o**ver **I**P, and is said *koi*, like
-the fish.
+the fish. Despite the name, KVMs reached in other ways, such as over USB
+or a serial line, are meant to be supported too.
 
 ## Backends
 
