@@ -67,10 +67,10 @@ def _socket_mode(value) -> int:
     return int(value, 8)
 
 
-def _daemon_settings(config: Config, table: dict) -> None:
+def _daemon_settings(config: Config, table: dict, config_dir: pathlib.Path) -> None:
     table = dict(table)
     if "socket" in table:
-        config.socket = pathlib.Path(table.pop("socket"))
+        config.socket = config_dir / table.pop("socket")
     if "socket_mode" in table:
         config.socket_mode = _socket_mode(table.pop("socket_mode"))
     if "socket_group" in table:
@@ -131,7 +131,7 @@ def load(path: pathlib.Path) -> Config:
     config = Config()
     config_dir = path.resolve().parent
     document = dict(document)
-    _daemon_settings(config, document.pop("daemon", {}))
+    _daemon_settings(config, document.pop("daemon", {}), config_dir)
     _http_settings(config, document.pop("http", {}), config_dir)
 
     targets = document.pop("targets", {})

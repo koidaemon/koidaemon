@@ -69,6 +69,15 @@ def test_daemon_settings(tmp_path):
     assert loaded.socket_group == "lava"
 
 
+def test_relative_socket_path(tmp_path):
+    text = """
+    [daemon]
+    socket = "koid.sock"
+    """ + RARITAN
+    loaded = config.load(write_config(tmp_path, text))
+    assert loaded.socket == tmp_path.resolve() / "koid.sock"
+
+
 @pytest.mark.parametrize("text, message", [
     ("[daemon]\nsocket_mode = 660\n" + RARITAN, "octal digits in quotes"),
     ("[daemon]\nport = 1\n" + RARITAN, r"\[daemon\]: unknown settings port"),
