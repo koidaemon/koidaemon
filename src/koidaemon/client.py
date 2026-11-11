@@ -73,8 +73,11 @@ class Client:
             try:
                 connection.connect(str(self.socket_path))
             except OSError as error:
+                # Some errors, such as a path too long for a socket, have
+                # no strerror.
+                reason = error.strerror or str(error)
                 raise KoiError("cannot connect to koid at %s: %s"
-                               % (self.socket_path, error.strerror)) from error
+                               % (self.socket_path, reason)) from error
             try:
                 connection.sendall(json.dumps(request).encode() + b"\n")
                 with connection.makefile("rb") as replies:

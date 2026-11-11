@@ -293,3 +293,9 @@ def test_a_daemon_that_hangs_up(tmp_path):
 def test_no_daemon(tmp_path):
     with pytest.raises(KoiError, match="cannot connect to koid"):
         Client(tmp_path / "nothing.sock").call("targets")
+
+
+def test_socket_path_too_long(tmp_path):
+    long_path = tmp_path / ("x" * 120) / "koid.sock"
+    with pytest.raises(KoiError, match="cannot connect to koid at .*: AF_UNIX path too long"):
+        Client(long_path).call("targets")
