@@ -5,8 +5,10 @@
 """A stand-in for PiKVM's kvmd HTTP API, enough to test the pikvm backend.
 
 It follows kvmd where the backend depends on its behaviour: the JSON
-envelope, the login headers, refusing to change the drive while it is
-connected, and quietly dropping the CD flag for images too big to be CDs.
+envelope, the login headers, running the video streamer only while a
+client watches through the WebSocket, refusing to change the drive while
+it is connected, and quietly dropping the CD flag for images too big to be
+CDs.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ import json
 import threading
 import urllib.parse
 from dataclasses import dataclass
+
+from koidaemon import websocket
 
 
 def make_jpeg(width: int, height: int) -> bytes:
@@ -41,18 +45,31 @@ class FakeKVMD:
         self.password = password
         self.requests: list[Request] = []
 
-        # Video: None means the streamer is not running.
-        self.resolution: tuple[int, int] | None = (1920, 1080)
-        self.snapshot_size: tuple[int, int] | None = (1920, 1080)
-        # Served instead of a JPEG of snapshot_size, when set.
+        # Video.  signal is what the target sends, None for nothing.  Like
+        # kvmd, the streamer only runs while a WebSocket client watches,
+        # unless it is set to stream forever.
+        self.signal: tuple[int, int] | None = (1920, 1080)
+        self.stream_forever = False
+        # Snapshots answered 503 before the streamer has a frame.
+        self.unready_snapshots = 0
+        # Served instead of a JPEG of the signal's size, when set.
         self.snapshot_data: bytes | None = None
+        self.watchers = 0
+        self.watch_count = 0
+        self.pongs: list[bytes] = []
+        self._lock = threading.Lock()
 
         # Mass storage.
         self.msd_enabled = True
         self.images: dict[str, dict] = {}
         self.uploads: dict[str, bytes] = {}
         self.drive = {"image": None, "connected": False, "cdrom": False, "rw": False}
-        self.cdrom_limit = 1000
+        self.cdrom_limit = 10 * 1024 * 1024
+        # Like kvmd, which finds images by watching its storage, an upload
+        # is only listed, and can only be selected, after this many more
+        # requests for the drive's state.
+        self.unlisted_reads = 1
+        self._unlisted: dict[str, int] = {}
 
         # Misbehaviour, for testing how the backend copes.
         self.answer_everything_with: tuple[int, bytes] | None = None
@@ -87,6 +104,10 @@ class FakeKVMD:
     def __exit__(self, *exc_info) -> None:
         self._server.shutdown()
         self._server.server_close()
+
+    @property
+    def streaming(self) -> bool:
+        return self.stream_forever or self.watchers > 0
 
     def calls(self, path: str) -> list[Request]:
         """The requests made to one API path, e.g. "hid/print"."""
@@ -137,35 +158,83 @@ class FakeKVMD:
 
     # Video.
 
+    def _route_ws(self, handler, request) -> None:
+        handler.send_response(101)
+        handler.send_header("Upgrade", "websocket")
+        handler.send_header("Connection", "Upgrade")
+        handler.send_header("Sec-WebSocket-Accept",
+                            websocket.accept_key(request.headers["Sec-WebSocket-Key"]))
+        handler.end_headers()
+        handler.close_connection = True
+        stream = request.query.get("stream", "1") in ("1", "true")
+
+        with self._lock:
+            self.watch_count += 1
+            if stream:
+                self.watchers += 1
+        try:
+            # kvmd sends events straight away, and pings to check the
+            # client is still there.
+            handler.wfile.write(websocket.encode_frame(0x1, b'{"event_type": "loop"}'))
+            handler.wfile.write(websocket.encode_frame(websocket.OPCODE_PING, b"still there?"))
+            self._read_websocket(handler)
+        except OSError:
+            # The client hung up.
+            pass
+        finally:
+            with self._lock:
+                if stream:
+                    self.watchers -= 1
+
+    def _read_websocket(self, handler) -> None:
+        while True:
+            try:
+                opcode, payload = websocket.read_frame(handler.rfile)
+            except (OSError, websocket.WebSocketError):
+                return
+            if opcode == websocket.OPCODE_PONG:
+                self.pongs.append(payload)
+            elif opcode == websocket.OPCODE_CLOSE:
+                handler.wfile.write(websocket.encode_frame(websocket.OPCODE_CLOSE, payload))
+                return
+
     def _route_streamer(self, handler, request) -> None:
-        if self.resolution is None:
+        if not self.streaming:
             self._ok(handler, {"streamer": None})
             return
-        width, height = self.resolution
-        source = {"online": True, "resolution": {"width": width, "height": height}}
+        # Without a signal kvmd reports its last resolution, or a default.
+        width, height = self.signal or (640, 480)
+        source = {"online": self.signal is not None,
+                  "resolution": {"width": width, "height": height}}
         self._ok(handler, {"streamer": {"source": source}})
 
     def _route_streamer_snapshot(self, handler, request) -> None:
-        if self.snapshot_size is None:
-            self._json(handler, 503, False, {"error": "UnavailableError",
-                                             "error_msg": "Service Unavailable"})
+        if self.streaming and self.signal is not None and self.unready_snapshots:
+            self.unready_snapshots -= 1
+            self._unavailable(handler)
+            return
+        if not self.streaming or self.signal is None:
+            self._unavailable(handler)
             return
         if self.snapshot_data is not None:
             data = self.snapshot_data
         else:
-            data = make_jpeg(*self.snapshot_size)
+            data = make_jpeg(*self.signal)
         handler.send_response(200)
         handler.send_header("Content-Type", "image/jpeg")
         handler.send_header("Content-Length", str(len(data)))
         handler.end_headers()
         handler.wfile.write(data)
 
+    def _unavailable(self, handler) -> None:
+        self._json(handler, 503, False, {"error": "UnavailableError",
+                                         "error_msg": "Service Unavailable"})
+
     # Keyboard and mouse: accepted and recorded.
 
     def _route_hid_print(self, handler, request) -> None:
         self._ok(handler)
 
-    _route_hid_events_send_shortcut = _route_hid_print
     _route_hid_events_send_key = _route_hid_print
     _route_hid_events_send_mouse_button = _route_hid_print
     _route_hid_events_send_mouse_move = _route_hid_print
@@ -174,6 +243,10 @@ class FakeKVMD:
     # Mass storage.
 
     def _route_msd(self, handler, request) -> None:
+        for name in list(self._unlisted):
+            self._unlisted[name] -= 1
+            if self._unlisted[name] < 0:
+                del self._unlisted[name]
         if not self.msd_enabled:
             self._ok(handler, {"enabled": False, "online": False, "drive": None,
                                "storage": None})
@@ -182,12 +255,17 @@ class FakeKVMD:
         if drive["image"] is not None:
             drive["image"] = {"name": drive["image"], "size": self.images[drive["image"]]["size"]}
         self._ok(handler, {"enabled": True, "online": True, "busy": False, "drive": drive,
-                           "storage": {"images": dict(self.images), "parts": {}}})
+                           "storage": {"images": self._listed_images(), "parts": {}}})
+
+    def _listed_images(self) -> dict:
+        return {name: image for name, image in self.images.items() if name not in self._unlisted}
 
     def _route_msd_write(self, handler, request) -> None:
         name = request.query["image"]
         self.images[name] = {"size": len(request.body), "complete": True}
         self.uploads[name] = request.body
+        if self.unlisted_reads:
+            self._unlisted[name] = self.unlisted_reads
         self._ok(handler, {"image": {"name": name, "size": len(request.body), "written": 0}})
 
     def _route_msd_set_params(self, handler, request) -> None:
@@ -195,7 +273,7 @@ class FakeKVMD:
             self._fail(handler, "MsdConnectedError", "the drive is connected")
             return
         name = request.query.get("image")
-        if name not in self.images:
+        if name not in self._listed_images():
             self._fail(handler, "MsdUnknownImageError", "no such image")
             return
         self.drive["image"] = name

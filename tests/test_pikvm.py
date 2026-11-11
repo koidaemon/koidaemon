@@ -5,13 +5,14 @@
 import hashlib
 import pathlib
 import ssl
+import time
 
 import pytest
 
 from koidaemon import keys
 from koidaemon.backends import pikvm
 from koidaemon.backends.base import Settings
-from koidaemon.errors import BackendError, ConfigError, Unsupported
+from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
 
 from fake_kvmd import FakeKVMD, make_jpeg
 from fakes import make_certificate
@@ -21,6 +22,13 @@ def make_backend(tmp_path, url, password="secret", **settings) -> pikvm.PiKVMBac
     (tmp_path / "password").write_text(password + "\n")
     values = {"url": url, "password_file": "password", **settings}
     return pikvm.PiKVMBackend("board", Settings("board", values, tmp_path))
+
+
+@pytest.fixture(autouse=True)
+def quick_waits(monkeypatch):
+    monkeypatch.setattr(pikvm, "VIDEO_WAIT", 0.5)
+    monkeypatch.setattr(pikvm, "VIDEO_POLL_INTERVAL", 0.02)
+    monkeypatch.setattr(pikvm, "IMAGE_POLL_INTERVAL", 0.01)
 
 
 @pytest.fixture
@@ -37,7 +45,7 @@ def backend(tmp_path, kvmd):
 @pytest.fixture
 def image(tmp_path):
     path = tmp_path / "disk image.img"
-    path.write_bytes(b"\x00" * 600)
+    path.write_bytes(b"\x00" * pikvm.MIN_CD_SIZE)
     return path
 
 
@@ -130,26 +138,71 @@ def test_kvmd_error_messages_are_passed_on(kvmd, backend):
 # Status and screen
 # ----------------------------------------------------------------------
 
-def test_status_with_video(backend):
+def test_status_while_the_streamer_runs(kvmd, backend):
+    kvmd.stream_forever = True
     assert backend.status() == {"online": True, "video": {"width": 1920, "height": 1080}}
 
 
-def test_status_without_video(kvmd, backend):
-    kvmd.resolution = None
+def test_status_does_not_start_the_streamer(kvmd, backend):
+    assert backend.status() == {"online": True, "video": None}
+    assert kvmd.watch_count == 0
+
+
+def test_status_without_a_signal(kvmd, backend):
+    kvmd.stream_forever = True
+    kvmd.signal = None
     assert backend.status() == {"online": True, "video": None}
 
 
-def test_snapshot(kvmd, backend):
-    kvmd.snapshot_size = (1024, 768)
+def test_snapshot_watches_to_start_the_streamer(kvmd, backend):
+    kvmd.signal = (1024, 768)
     snapshot = backend.snapshot()
     assert snapshot.format == "jpeg"
     assert snapshot.data == make_jpeg(1024, 768)
     assert (snapshot.width, snapshot.height) == (1024, 768)
+    (watch,) = kvmd.calls("ws")
+    assert watch.query == {"stream": "1"}
+    assert watch.headers["X-KVMD-Passwd"] == "secret"
 
 
-def test_snapshot_without_video(kvmd, backend):
-    kvmd.snapshot_size = None
+def test_snapshot_stops_watching_afterwards(kvmd, backend):
+    backend.snapshot()
+    deadline = time.monotonic() + 5
+    while kvmd.watchers and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert kvmd.watchers == 0
+
+
+def test_snapshot_while_the_streamer_runs(kvmd, backend):
+    kvmd.stream_forever = True
+    backend.snapshot()
+    assert kvmd.watch_count == 0
+
+
+def test_snapshot_waits_for_the_first_frame(kvmd, backend):
+    kvmd.unready_snapshots = 3
+    assert backend.snapshot().width == 1920
+    assert len(kvmd.calls("streamer/snapshot")) == 4
+
+
+def test_snapshot_without_a_signal(kvmd, backend):
+    kvmd.signal = None
+    with pytest.raises(BackendError, match="no video signal from the target"):
+        backend.snapshot()
+    assert kvmd.calls("streamer/snapshot") == []
+
+
+def test_snapshot_never_ready(kvmd, backend):
+    kvmd.unready_snapshots = 1000
     with pytest.raises(BackendError, match="Service Unavailable"):
+        backend.snapshot()
+
+
+def test_watching_with_the_wrong_password(tmp_path, kvmd, backend, monkeypatch):
+    # The streamer state is readable, so only the WebSocket is refused.
+    monkeypatch.setattr(backend, "_source", lambda: None)
+    backend.password = "wrong"
+    with pytest.raises(BackendError, match="refused the login for admin"):
         backend.snapshot()
 
 
@@ -195,8 +248,14 @@ def test_type_text_with_a_keymap(tmp_path, kvmd):
 
 def test_press(kvmd, backend):
     backend.press([[keys.LEFT_CTRL, keys.LEFT_ALT, 0x4C], [0x3B]])
-    shortcuts = [request.query["keys"] for request in kvmd.calls("hid/events/send_shortcut")]
-    assert shortcuts == ["ControlLeft,AltLeft,Delete", "F2"]
+    events = [(request.query["key"], request.query["state"])
+              for request in kvmd.calls("hid/events/send_key")]
+    # Pressed in order, released in reverse.
+    assert events == [
+        ("ControlLeft", "1"), ("AltLeft", "1"), ("Delete", "1"),
+        ("Delete", "0"), ("AltLeft", "0"), ("ControlLeft", "0"),
+        ("F2", "1"), ("F2", "0"),
+    ]
 
 
 def test_key_down_and_up(kvmd, backend):
@@ -231,33 +290,32 @@ def test_to_mouse_range_middle():
 
 
 def test_mouse_move_uses_the_screen_size(kvmd, backend):
-    kvmd.resolution = (1000, 500)
+    kvmd.signal = (1000, 500)
     backend.mouse_move(999, 0)
     (request,) = kvmd.calls("hid/events/send_mouse_move")
     assert request.query == {"to_x": "32767", "to_y": "-32768"}
+    # The streamer was stopped, so the size needed watching for.
+    assert kvmd.watch_count == 1
 
 
-def test_mouse_move_starts_the_streamer_for_the_size(kvmd, backend):
-    # While nobody watches, kvmd stops the streamer; a snapshot gives the
-    # size instead.
-    kvmd.resolution = None
-    kvmd.snapshot_size = (100, 100)
+def test_mouse_move_while_the_streamer_runs(kvmd, backend):
+    kvmd.stream_forever = True
+    kvmd.signal = (100, 100)
     backend.mouse_move(99, 99)
-    assert len(kvmd.calls("streamer/snapshot")) == 1
     assert kvmd.calls("hid/events/send_mouse_move")[0].query == {"to_x": "32767",
                                                                   "to_y": "32767"}
+    assert kvmd.watch_count == 0
 
 
-def test_mouse_move_without_any_video(kvmd, backend):
-    kvmd.resolution = None
-    kvmd.snapshot_size = None
-    with pytest.raises(BackendError, match="Service Unavailable"):
+def test_mouse_move_without_a_signal(kvmd, backend):
+    kvmd.signal = None
+    with pytest.raises(BackendError, match="no video signal"):
         backend.mouse_move(1, 1)
+    assert kvmd.calls("hid/events/send_mouse_move") == []
 
 
-def test_mouse_move_when_the_screen_size_is_unknown(kvmd, backend):
-    kvmd.resolution = None
-    kvmd.snapshot_data = b"not a picture"
+def test_mouse_move_when_the_screen_size_is_unknown(kvmd, backend, monkeypatch):
+    monkeypatch.setattr(backend, "_source", lambda: {"online": True, "resolution": {}})
     with pytest.raises(BackendError, match="pixel positions cannot be placed"):
         backend.mouse_move(1, 1)
 
@@ -311,6 +369,29 @@ def test_insert_a_stick(kvmd, backend, image):
     assert status == {"inserted": True, "image": name, "mode": "stick", "writable": False}
     assert kvmd.uploads[name] == image.read_bytes()
     assert kvmd.calls("msd/set_params")[0].query == {"image": name, "cdrom": "0", "rw": "0"}
+
+
+def test_insert_waits_for_kvmd_to_list_the_upload(kvmd, backend, image):
+    kvmd.unlisted_reads = 3
+    backend.storage_insert(image, "stick", False)
+    assert len(kvmd.calls("msd/set_params")) == 1
+
+
+def test_an_upload_kvmd_never_lists(kvmd, backend, image, monkeypatch):
+    monkeypatch.setattr(pikvm, "IMAGE_WAIT", 0.1)
+    monkeypatch.setattr(pikvm, "IMAGE_POLL_INTERVAL", 0.02)
+    kvmd.unlisted_reads = 1000
+    with pytest.raises(BackendError, match="did not list koid-.* after it was uploaded"):
+        backend.storage_insert(image, "stick", False)
+    assert kvmd.calls("msd/set_params") == []
+
+
+def test_a_cd_too_small_for_the_pikvm(kvmd, backend, tmp_path):
+    small = tmp_path / "small.iso"
+    small.write_bytes(b"\x00" * (pikvm.MIN_CD_SIZE - 1))
+    with pytest.raises(InvalidRequest, match="too small to be a CD.*600 KiB"):
+        backend.storage_insert(small, "cdrom", False)
+    assert kvmd.uploads == {}
 
 
 def test_insert_a_cd(kvmd, backend, image):

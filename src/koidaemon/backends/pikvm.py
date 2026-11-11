@@ -5,8 +5,8 @@
 """Backend for PiKVM, and other devices running its kvmd daemon.
 
 Everything goes through kvmd's HTTP API (https://docs.pikvm.org/api/),
-authenticated with the X-KVMD-User and X-KVMD-Passwd headers.  Written from
-kvmd's source; not yet tested against real hardware.
+authenticated with the X-KVMD-User and X-KVMD-Passwd headers.  Tested with
+a PiKVM V4 Mini running kvmd 4.61.
 
 Configuration:
 
@@ -26,6 +26,7 @@ certificate as ca_file (better) or set verify_tls = false.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -39,7 +40,8 @@ import urllib.request
 
 from koidaemon import commands, keys
 from koidaemon.backends.base import Backend, Settings, Snapshot
-from koidaemon.errors import BackendError, ConfigError, Unsupported
+from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
+from koidaemon.websocket import WebSocket, WebSocketError
 
 LOG = logging.getLogger(__name__)
 
@@ -52,10 +54,27 @@ MAX_WHEEL_STEP = 127
 # Pause between the clicks of a double click.
 CLICK_INTERVAL = 0.05
 
+# How long to wait for video once kvmd's streamer is running, and how
+# often to look.
+VIDEO_WAIT = 10.0
+VIDEO_POLL_INTERVAL = 0.25
+
 # Uploaded images are named after their contents, so an image that is
 # already on the PiKVM is not uploaded again.
 IMAGE_PREFIX = "koid-"
 HASH_CHUNK = 1024 * 1024
+
+# Linux's USB mass storage gadget will not present a CD smaller than 300
+# sectors of 2048 bytes; kvmd then fails with a bare HTTP 500.
+MIN_CD_SIZE = 300 * 2048
+
+# How long kvmd may take to notice an uploaded image, and how often to look.
+IMAGE_WAIT = 10.0
+IMAGE_POLL_INTERVAL = 0.25
+
+
+class _Unavailable(BackendError):
+    """kvmd answered 503: what was asked for is not ready, such as video."""
 
 
 def jpeg_size(data: bytes) -> tuple[int, int] | None:
@@ -169,6 +188,8 @@ class PiKVMBackend(Backend):
                                         context=self._tls) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
+            if error.code == 503:
+                raise _Unavailable(self._describe_http_error(error)) from error
             raise BackendError(self._describe_http_error(error)) from error
         except (urllib.error.URLError, OSError) as error:
             reason = getattr(error, "reason", error)
@@ -212,6 +233,8 @@ class PiKVMBackend(Backend):
         return streamer.get("source")
 
     def status(self) -> dict:
+        # Only reports video while kvmd's streamer happens to be running:
+        # starting it just to look would make status slow.
         source = self._source()
         video = None
         if source and source.get("online"):
@@ -219,27 +242,72 @@ class PiKVMBackend(Backend):
             video = {"width": resolution.get("width"), "height": resolution.get("height")}
         return {"online": True, "video": video}
 
+    def _watch(self) -> WebSocket:
+        """A connection to kvmd's WebSocket, which keeps its streamer running."""
+        url = self.url.replace("http", "ws", 1) + "/api/ws?stream=1"
+        headers = {"X-KVMD-User": self.user, "X-KVMD-Passwd": self.password}
+        return WebSocket(url, headers, self._tls, self.timeout)
+
+    @contextlib.contextmanager
+    def _video(self):
+        """Make sure kvmd's streamer runs and has a signal; yield the source.
+
+        kvmd only runs its streamer while someone watches, so if it is
+        stopped this watches through kvmd's WebSocket until the block ends.
+        """
+        source = self._source()
+        if source is not None and source.get("online"):
+            yield source
+            return
+
+        watching = self._watch() if source is None else contextlib.nullcontext()
+        try:
+            with watching:
+                yield self._wait_for_video()
+        except WebSocketError as error:
+            if error.status in (401, 403):
+                raise BackendError("%s refused the login for %s" % (self.url, self.user)) from error
+            raise BackendError("%s: cannot watch the video: %s" % (self.url, error)) from error
+
+    def _wait_for_video(self) -> dict:
+        deadline = time.monotonic() + VIDEO_WAIT
+        while True:
+            source = self._source()
+            if source is not None and source.get("online"):
+                return source
+            if time.monotonic() >= deadline:
+                raise BackendError("no video signal from the target")
+            time.sleep(VIDEO_POLL_INTERVAL)
+
     def snapshot(self) -> Snapshot:
-        data = self._call("GET", "streamer/snapshot", {"allow_offline": "0"})
+        with self._video():
+            data = self._take_snapshot()
         size = jpeg_size(data)
         if size is None:
             return Snapshot("jpeg", data)
         return Snapshot("jpeg", data, size[0], size[1])
 
+    def _take_snapshot(self) -> bytes:
+        # A streamer that has just started may not have a frame yet.
+        deadline = time.monotonic() + VIDEO_WAIT
+        while True:
+            try:
+                return self._call("GET", "streamer/snapshot", {"allow_offline": "0"})
+            except _Unavailable:
+                if time.monotonic() >= deadline:
+                    raise
+            time.sleep(VIDEO_POLL_INTERVAL)
+
     def _screen_size(self) -> tuple[int, int]:
         """The target's screen size, needed to place the pointer in pixels."""
-        source = self._source()
-        if source and source.get("online"):
+        with self._video() as source:
             resolution = source.get("resolution", {})
-            if resolution.get("width") and resolution.get("height"):
-                return resolution["width"], resolution["height"]
-
-        # The streamer only runs while someone watches; a snapshot starts
-        # it and carries the size itself.
-        snapshot = self.snapshot()
-        if snapshot.width is None:
-            raise BackendError("no video from the target, so pixel positions cannot be placed")
-        return snapshot.width, snapshot.height
+        width = resolution.get("width")
+        height = resolution.get("height")
+        if not width or not height:
+            raise BackendError("kvmd did not say the screen size, so pixel positions "
+                               "cannot be placed")
+        return width, height
 
     # ------------------------------------------------------------------
     # Keyboard
@@ -254,10 +322,14 @@ class PiKVMBackend(Backend):
         self._json("POST", "hid/print", query, body=text.encode("utf-8"), headers=headers)
 
     def press(self, combinations: list[list[int]]) -> None:
+        # One key at a time: kvmd's send_shortcut, which would do a whole
+        # combination, is newer than many PiKVMs' kvmd.
         for usages in combinations:
             codes = [_web_code(usage) for usage in usages]
-            # kvmd presses these in order and releases them in reverse.
-            self._json("POST", "hid/events/send_shortcut", {"keys": ",".join(codes)})
+            for code in codes:
+                self._json("POST", "hid/events/send_key", {"key": code, "state": "1"})
+            for code in reversed(codes):
+                self._json("POST", "hid/events/send_key", {"key": code, "state": "0"})
 
     def key_down(self, usage: int) -> None:
         self._json("POST", "hid/events/send_key", {"key": _web_code(usage), "state": "1"})
@@ -330,9 +402,13 @@ class PiKVMBackend(Backend):
 
     def storage_insert(self, image: pathlib.Path, mode: str, writable: bool) -> dict:
         try:
+            size = image.stat().st_size
             digest = file_digest(image)
         except OSError as error:
             raise BackendError("cannot read %s: %s" % (image, error.strerror)) from error
+        if mode == "cdrom" and size < MIN_CD_SIZE:
+            raise InvalidRequest("%s is too small to be a CD: the PiKVM needs at least %d KiB"
+                                 % (image.name, MIN_CD_SIZE // 1024))
 
         state = self._msd()
         self._disconnect(state)
@@ -341,6 +417,7 @@ class PiKVMBackend(Backend):
         stored = (state.get("storage") or {}).get("images", {})
         if name not in stored or not stored[name].get("complete", True):
             self._upload(image, name)
+            self._wait_for_image(name)
 
         cdrom = mode == "cdrom"
         params = {
@@ -363,6 +440,22 @@ class PiKVMBackend(Backend):
             raise BackendError("the PiKVM would not make %s %s"
                                % (image.name, "writable" if writable else "read-only"))
         return status
+
+    def _wait_for_image(self, name: str) -> None:
+        """Wait for kvmd to notice an uploaded image.
+
+        kvmd finds images by watching its storage directory, so for a
+        moment after an upload it does not know the image and refuses to
+        select it.
+        """
+        deadline = time.monotonic() + IMAGE_WAIT
+        while True:
+            images = (self._msd().get("storage") or {}).get("images", {})
+            if images.get(name, {}).get("complete", False):
+                return
+            if time.monotonic() >= deadline:
+                raise BackendError("the PiKVM did not list %s after it was uploaded" % name)
+            time.sleep(IMAGE_POLL_INTERVAL)
 
     def storage_eject(self) -> None:
         self._disconnect(self._msd())
