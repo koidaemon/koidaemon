@@ -131,3 +131,56 @@ def test_closing_twice(kvmd):
     connection.open()
     connection.close()
     connection.close()
+
+
+def serve_websocket(reply_to_close_after):
+    """A WebSocket server for one client, which answers the client's close
+    frame after reply_to_close_after seconds, or never if it is None."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        connection, _ = listener.accept()
+        with connection:
+            stream = connection.makefile("rb")
+            key = None
+            while True:
+                line = stream.readline().decode()
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+                if line in ("\r\n", ""):
+                    break
+            connection.sendall(("HTTP/1.1 101 Switching Protocols\r\n"
+                                "Sec-WebSocket-Accept: %s\r\n\r\n"
+                                % websocket.accept_key(key)).encode())
+            opcode, payload = websocket.read_frame(stream)
+            assert opcode == websocket.OPCODE_CLOSE
+            if reply_to_close_after is None:
+                time.sleep(1)
+                return
+            time.sleep(reply_to_close_after)
+            connection.sendall(websocket.encode_frame(websocket.OPCODE_CLOSE, payload))
+        listener.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return "ws://127.0.0.1:%d/" % listener.getsockname()[1]
+
+
+def test_close_waits_for_the_server():
+    # So that the server has seen the client leave when close() returns.
+    connection = WebSocket(serve_websocket(reply_to_close_after=0.3))
+    connection.open()
+    start = time.monotonic()
+    connection.close()
+    assert time.monotonic() - start >= 0.3
+
+
+def test_close_gives_up_on_a_silent_server(monkeypatch):
+    monkeypatch.setattr(websocket, "CLOSE_WAIT", 0.2)
+    connection = WebSocket(serve_websocket(reply_to_close_after=None))
+    connection.open()
+    start = time.monotonic()
+    connection.close()
+    assert time.monotonic() - start < 0.9

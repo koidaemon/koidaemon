@@ -54,6 +54,10 @@ MAX_WHEEL_STEP = 127
 # Pause between the clicks of a double click.
 CLICK_INTERVAL = 0.05
 
+# kvmd releases held keys and buttons as it sees a WebSocket client leave,
+# just after answering its close; wait this long before pressing them again.
+RELEASE_SETTLE = 0.25
+
 # How long to wait for video once kvmd's streamer is running, and how
 # often to look.
 VIDEO_WAIT = 10.0
@@ -142,6 +146,15 @@ class PiKVMBackend(Backend):
         verify_tls = settings.get_bool("verify_tls", True)
         settings.finish()
         self._tls = self._tls_context(ca_file, verify_tls)
+        # The last screen size seen, so that placing the pointer does not
+        # need kvmd's streamer started for every move.
+        self._screen: tuple[int, int] | None = None
+        # Keys (kvmd's names) and mouse buttons held down with key_down and
+        # mouse_down, in the order they were pressed.  kvmd releases
+        # everything held when a WebSocket client leaves, so after koid's
+        # own WebSocket closes they are pressed again.
+        self._held_keys: list[str] = []
+        self._held_buttons: list[str] = []
 
     @staticmethod
     def _tls_context(ca_file: pathlib.Path | None, verify: bool) -> ssl.SSLContext:
@@ -232,14 +245,26 @@ class PiKVMBackend(Backend):
             return None
         return streamer.get("source")
 
+    def _remember_screen(self, source: dict | None) -> tuple[int, int] | None:
+        """The screen size from a video source that has a signal, if it
+        says one, remembered for placing the pointer."""
+        if source is None or not source.get("online"):
+            return None
+        resolution = source.get("resolution") or {}
+        width = resolution.get("width")
+        height = resolution.get("height")
+        if not width or not height:
+            return None
+        self._screen = (width, height)
+        return self._screen
+
     def status(self) -> dict:
         # Only reports video while kvmd's streamer happens to be running:
         # starting it just to look would make status slow.
-        source = self._source()
+        size = self._remember_screen(self._source())
         video = None
-        if source and source.get("online"):
-            resolution = source.get("resolution", {})
-            video = {"width": resolution.get("width"), "height": resolution.get("height")}
+        if size is not None:
+            video = {"width": size[0], "height": size[1]}
         return {"online": True, "video": video}
 
     def _watch(self) -> WebSocket:
@@ -268,6 +293,25 @@ class PiKVMBackend(Backend):
             if error.status in (401, 403):
                 raise BackendError("%s refused the login for %s" % (self.url, self.user)) from error
             raise BackendError("%s: cannot watch the video: %s" % (self.url, error)) from error
+        finally:
+            if source is None:
+                self._press_held_again()
+
+    def _press_held_again(self) -> None:
+        """Press what koid holds down again, after kvmd released it all
+        because koid's WebSocket closed."""
+        if not self._held_keys and not self._held_buttons:
+            return
+        time.sleep(RELEASE_SETTLE)
+        try:
+            for key in self._held_keys:
+                self._json("POST", "hid/events/send_key", {"key": key, "state": "1"})
+            for button in self._held_buttons:
+                self._json("POST", "hid/events/send_mouse_button",
+                           {"button": button, "state": "1"})
+        except BackendError as error:
+            LOG.warning("%s: could not press held keys and buttons again: %s",
+                        self.target, error)
 
     def _wait_for_video(self) -> dict:
         deadline = time.monotonic() + VIDEO_WAIT
@@ -280,7 +324,8 @@ class PiKVMBackend(Backend):
             time.sleep(VIDEO_POLL_INTERVAL)
 
     def snapshot(self) -> Snapshot:
-        with self._video():
+        with self._video() as source:
+            self._remember_screen(source)
             data = self._take_snapshot()
         size = jpeg_size(data)
         if size is None:
@@ -299,15 +344,23 @@ class PiKVMBackend(Backend):
             time.sleep(VIDEO_POLL_INTERVAL)
 
     def _screen_size(self) -> tuple[int, int]:
-        """The target's screen size, needed to place the pointer in pixels."""
-        with self._video() as source:
-            resolution = source.get("resolution", {})
-        width = resolution.get("width")
-        height = resolution.get("height")
-        if not width or not height:
+        """The target's screen size, needed to place the pointer in pixels.
+
+        The streamer's state is cheap to ask for and gives the current size
+        while it runs.  Otherwise the last size seen is used, and kvmd's
+        streamer is only started (by watching, which releases held keys and
+        buttons) when koid has never seen one.
+        """
+        size = self._remember_screen(self._source())
+        if size is None:
+            size = self._screen
+        if size is None:
+            with self._video() as source:
+                size = self._remember_screen(source)
+        if size is None:
             raise BackendError("kvmd did not say the screen size, so pixel positions "
                                "cannot be placed")
-        return width, height
+        return size
 
     # ------------------------------------------------------------------
     # Keyboard
@@ -330,12 +383,18 @@ class PiKVMBackend(Backend):
                 self._json("POST", "hid/events/send_key", {"key": code, "state": "1"})
             for code in reversed(codes):
                 self._json("POST", "hid/events/send_key", {"key": code, "state": "0"})
+                # Released, even if it was held before.
+                _forget(self._held_keys, code)
 
     def key_down(self, usage: int) -> None:
-        self._json("POST", "hid/events/send_key", {"key": _web_code(usage), "state": "1"})
+        code = _web_code(usage)
+        self._json("POST", "hid/events/send_key", {"key": code, "state": "1"})
+        _remember(self._held_keys, code)
 
     def key_up(self, usage: int) -> None:
-        self._json("POST", "hid/events/send_key", {"key": _web_code(usage), "state": "0"})
+        code = _web_code(usage)
+        self._json("POST", "hid/events/send_key", {"key": code, "state": "0"})
+        _forget(self._held_keys, code)
 
     # ------------------------------------------------------------------
     # Mouse
@@ -357,12 +416,15 @@ class PiKVMBackend(Backend):
                 time.sleep(CLICK_INTERVAL)
             # Without a state kvmd presses and releases the button.
             self._json("POST", "hid/events/send_mouse_button", {"button": button})
+        _forget(self._held_buttons, button)
 
     def mouse_down(self, button: str) -> None:
         self._json("POST", "hid/events/send_mouse_button", {"button": button, "state": "1"})
+        _remember(self._held_buttons, button)
 
     def mouse_up(self, button: str) -> None:
         self._json("POST", "hid/events/send_mouse_button", {"button": button, "state": "0"})
+        _forget(self._held_buttons, button)
 
     def mouse_scroll(self, notches: int) -> None:
         # Positive delta_y scrolls up, as with a USB wheel.  Each request
@@ -469,6 +531,16 @@ class PiKVMBackend(Backend):
             "mode": "cdrom" if drive.get("cdrom") else "stick",
             "writable": bool(drive.get("rw")),
         }
+
+
+def _remember(held: list[str], name: str) -> None:
+    if name not in held:
+        held.append(name)
+
+
+def _forget(held: list[str], name: str) -> None:
+    if name in held:
+        held.remove(name)
 
 
 def _web_code(usage: int) -> str:

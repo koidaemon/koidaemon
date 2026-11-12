@@ -57,10 +57,20 @@ size, so koid converts pixels using the video resolution.
 kvmd only runs its video streamer while a client watches through its
 WebSocket (`/api/ws`), such as an open web interface. While the streamer
 is stopped, kvmd has no snapshot and no screen size to give. So for
-`snapshot`, and for mouse commands with a position, koid connects to the
-WebSocket itself, waits up to 10 seconds for the streamer to see a signal,
-does its work, and disconnects. kvmd stops the streamer again a little
-later.
+`snapshot` koid connects to the WebSocket itself, waits up to 10 seconds
+for the streamer to see a signal, does its work, and disconnects. kvmd
+stops the streamer again a little later.
+
+Mouse commands with a position need the screen size. koid uses the
+streamer's when it is running, and otherwise the last size it saw, so it
+only has to watch for the first move after koid starts.
+
+When a WebSocket client leaves, kvmd releases every key and mouse button
+held down. So after its own WebSocket closes, koid presses again whatever
+it holds with `keyboard.down` and `mouse.down`. A program on the target
+sees the button go up and down again; a drag carries on, but from where
+the pointer was. Closing the PiKVM's web interface releases them too,
+and koid does not notice that.
 
 With no signal from the target, such as when it is off, these commands
 fail with "no video signal from the target" after those 10 seconds.

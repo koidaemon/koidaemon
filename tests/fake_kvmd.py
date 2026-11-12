@@ -6,7 +6,8 @@
 
 It follows kvmd where the backend depends on its behaviour: the JSON
 envelope, the login headers, running the video streamer only while a
-client watches through the WebSocket, refusing to change the drive while
+client watches through the WebSocket, releasing every held key and mouse
+button when a WebSocket client leaves, refusing to change the drive while
 it is connected, and quietly dropping the CD flag for images too big to be
 CDs.
 """
@@ -56,6 +57,11 @@ class FakeKVMD:
         self.snapshot_data: bytes | None = None
         self.watchers = 0
         self.watch_count = 0
+        # WebSocket clients that have come and gone.
+        self.watches_ended = 0
+        # Keys and mouse buttons held down, as kvmd tracks them.
+        self.held_keys: set[str] = set()
+        self.held_buttons: set[str] = set()
         self.pongs: list[bytes] = []
         self._lock = threading.Lock()
 
@@ -185,6 +191,10 @@ class FakeKVMD:
             with self._lock:
                 if stream:
                     self.watchers -= 1
+                # Like kvmd's _on_ws_closed: release everything held.
+                self.held_keys.clear()
+                self.held_buttons.clear()
+                self.watches_ended += 1
 
     def _read_websocket(self, handler) -> None:
         while True:
@@ -235,8 +245,22 @@ class FakeKVMD:
     def _route_hid_print(self, handler, request) -> None:
         self._ok(handler)
 
-    _route_hid_events_send_key = _route_hid_print
-    _route_hid_events_send_mouse_button = _route_hid_print
+    def _route_hid_events_send_key(self, handler, request) -> None:
+        self._hold(self.held_keys, request.query["key"], request.query.get("state"))
+        self._ok(handler)
+
+    def _route_hid_events_send_mouse_button(self, handler, request) -> None:
+        self._hold(self.held_buttons, request.query["button"], request.query.get("state"))
+        self._ok(handler)
+
+    def _hold(self, held: set, name: str, state: str | None) -> None:
+        # Without a state, kvmd presses and releases.
+        with self._lock:
+            if state == "1":
+                held.add(name)
+            else:
+                held.discard(name)
+
     _route_hid_events_send_mouse_move = _route_hid_print
     _route_hid_events_send_mouse_wheel = _route_hid_print
 

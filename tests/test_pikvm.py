@@ -29,6 +29,7 @@ def quick_waits(monkeypatch):
     monkeypatch.setattr(pikvm, "VIDEO_WAIT", 0.5)
     monkeypatch.setattr(pikvm, "VIDEO_POLL_INTERVAL", 0.02)
     monkeypatch.setattr(pikvm, "IMAGE_POLL_INTERVAL", 0.01)
+    monkeypatch.setattr(pikvm, "RELEASE_SETTLE", 0.05)
 
 
 @pytest.fixture
@@ -298,6 +299,36 @@ def test_mouse_move_uses_the_screen_size(kvmd, backend):
     assert kvmd.watch_count == 1
 
 
+def test_moves_do_not_watch_once_the_size_is_known(kvmd, backend):
+    # Watching makes kvmd release held buttons, so only the first move,
+    # which has to learn the screen size, may do it.
+    kvmd.signal = (1000, 500)
+    for x in (10, 20, 30):
+        backend.mouse_move(x, 10)
+    assert kvmd.watch_count == 1
+    assert len(kvmd.calls("hid/events/send_mouse_move")) == 3
+
+
+def test_a_snapshot_teaches_the_size(kvmd, backend):
+    kvmd.signal = (1000, 500)
+    backend.snapshot()
+    backend.mouse_move(999, 0)
+    assert kvmd.watch_count == 1
+    assert kvmd.calls("hid/events/send_mouse_move")[0].query == {"to_x": "32767",
+                                                                  "to_y": "-32768"}
+
+
+def test_the_size_follows_a_running_streamer(kvmd, backend):
+    kvmd.signal = (1000, 500)
+    backend.mouse_move(1, 1)
+    # The target changes mode; the streamer, now running, says so.
+    kvmd.stream_forever = True
+    kvmd.signal = (100, 100)
+    backend.mouse_move(99, 99)
+    assert kvmd.calls("hid/events/send_mouse_move")[-1].query == {"to_x": "32767",
+                                                                   "to_y": "32767"}
+
+
 def test_mouse_move_while_the_streamer_runs(kvmd, backend):
     kvmd.stream_forever = True
     kvmd.signal = (100, 100)
@@ -340,6 +371,79 @@ def test_mouse_down_and_up(kvmd, backend):
     backend.mouse_up("middle")
     states = [request.query for request in kvmd.calls("hid/events/send_mouse_button")]
     assert states == [{"button": "middle", "state": "1"}, {"button": "middle", "state": "0"}]
+
+
+# kvmd releases every held key and button when a WebSocket client leaves,
+# and koid watches through a WebSocket while it needs video.
+
+def watching_finished(kvmd):
+    """Wait until the fake has seen every WebSocket client leave, so that
+    its releasing held input cannot come after the test looks."""
+    deadline = time.monotonic() + 5
+    while kvmd.watches_ended < kvmd.watch_count:
+        assert time.monotonic() < deadline, "a WebSocket never closed"
+        time.sleep(0.01)
+    return kvmd
+
+def test_a_held_button_survives_a_snapshot(kvmd, backend):
+    backend.mouse_down("left")
+    backend.snapshot()
+    watching_finished(kvmd)
+    assert kvmd.held_buttons == {"left"}
+
+
+def test_a_held_key_survives_a_snapshot(kvmd, backend):
+    backend.key_down(keys.LEFT_SHIFT)
+    backend.key_down(keys.LEFT_CTRL)
+    backend.snapshot()
+    watching_finished(kvmd)
+    assert kvmd.held_keys == {"ShiftLeft", "ControlLeft"}
+
+
+def test_a_held_button_survives_the_first_move(kvmd, backend):
+    # The move that learns the screen size has to watch.
+    backend.mouse_down("left")
+    backend.mouse_move(10, 10)
+    assert kvmd.watch_count == 1
+    watching_finished(kvmd)
+    assert kvmd.held_buttons == {"left"}
+
+
+def test_released_input_is_not_pressed_again(kvmd, backend):
+    backend.mouse_down("left")
+    backend.mouse_up("left")
+    backend.key_down(keys.LEFT_SHIFT)
+    backend.press([[keys.LEFT_SHIFT, 0x04]])
+    backend.mouse_down("right")
+    backend.mouse_click("right", 1, None, None)
+    before = len(kvmd.requests)
+    backend.snapshot()
+    pressed = [request for request in kvmd.requests[before:]
+               if request.query.get("state") == "1"]
+    assert pressed == []
+    watching_finished(kvmd)
+    assert (kvmd.held_keys, kvmd.held_buttons) == (set(), set())
+
+
+def test_nothing_held_means_no_waiting(kvmd, backend, monkeypatch):
+    monkeypatch.setattr(pikvm, "RELEASE_SETTLE", 5.0)
+    start = time.monotonic()
+    backend.snapshot()
+    assert time.monotonic() - start < 2
+
+
+def test_pressing_again_can_fail_quietly(kvmd, backend, monkeypatch, caplog):
+    backend.mouse_down("left")
+    real_json = backend._json
+
+    def failing(method, path, query=None, **kwargs):
+        if path == "hid/events/send_mouse_button":
+            raise pikvm.BackendError("gone")
+        return real_json(method, path, query, **kwargs)
+
+    monkeypatch.setattr(backend, "_json", failing)
+    backend.snapshot()
+    assert "could not press held keys and buttons again" in caplog.text
 
 
 @pytest.mark.parametrize("notches, steps", [

@@ -29,6 +29,8 @@ OPCODE_PING = 0x9
 OPCODE_PONG = 0xA
 
 MAX_HEADER_SIZE = 64 * 1024
+# How long close() waits for the server to answer its close frame.
+CLOSE_WAIT = 2.0
 
 
 class WebSocketError(Exception):
@@ -103,6 +105,8 @@ class WebSocket:
         self._stream = None
         self._thread = None
         self._send_lock = threading.Lock()
+        # Set when the server's close frame arrives, or the connection ends.
+        self._server_closed = threading.Event()
 
     def __enter__(self) -> "WebSocket":
         self.open()
@@ -195,14 +199,22 @@ class WebSocket:
         except (OSError, ValueError, WebSocketError):
             # The connection closed, from either end.
             return
+        finally:
+            self._server_closed.set()
 
     def close(self) -> None:
+        """Close the connection with the close handshake: send a close frame
+        and wait for the server's, so that the server has seen the client
+        leave before this returns."""
         if self._socket is None:
             return
         try:
             self._send(OPCODE_CLOSE, struct.pack(">H", 1000))
         except OSError:
             pass
+        else:
+            if self._thread is not None:
+                self._server_closed.wait(CLOSE_WAIT)
         self._close_socket()
 
     def _close_socket(self) -> None:
