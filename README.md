@@ -101,6 +101,7 @@ koictl mouse scroll -3
 koictl snapshot screen.png
 koictl snapshot --format jpeg screen.jpg
 koictl storage insert --cdrom installer.iso
+koictl storage insert --push-file disk.img
 koictl storage eject
 ```
 
@@ -139,9 +140,18 @@ the details.
 | `storage.status` | what is being presented |
 
 A command the target's KVM cannot do is refused as unsupported before the
-KVM is touched. `storage.insert` takes a path on the machine running koid,
-since koid reads the image; koictl turns relative paths into absolute
-ones.
+KVM is touched.
+
+`storage.insert` gets the image to koid one of two ways:
+
+* by default, as a path: koid opens the file itself, so it must see it at
+  the same path as koictl (koictl turns relative paths into absolute
+  ones);
+* with `--push-file`, koictl sends the file's contents, over the socket or
+  the HTTP API. It sends the name, size and SHA-256 first, and the
+  contents only if the KVM does not already have that image. Use this
+  when koid runs where it cannot read the client's files, such as in
+  another container or on another machine.
 
 ### From Python
 

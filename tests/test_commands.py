@@ -13,7 +13,7 @@ def test_defaults_are_filled_in():
         "button": "left", "count": 1, "x": None, "y": None,
     }
     assert commands.validate("storage.insert", {"image": "/images/a.img"}) == {
-        "image": "/images/a.img", "mode": "stick", "writable": False,
+        "image": "/images/a.img", "upload": None, "mode": "stick", "writable": False,
     }
     assert commands.validate("snapshot", None) == {"format": "png"}
 
@@ -128,3 +128,31 @@ def test_every_command_needs_a_known_capability():
     known = set(commands.ALL_CAPABILITIES) | {commands.ANY_STORAGE, None}
     for command in commands.COMMANDS.values():
         assert command.capability in known, command.name
+
+
+UPLOAD = {"name": "disk.img", "size": 600, "sha256": "ab" * 32}
+
+
+def test_storage_insert_with_an_upload():
+    args = commands.validate("storage.insert", {"upload": UPLOAD})
+    assert args["upload"] == UPLOAD and args["image"] is None
+
+
+@pytest.mark.parametrize("args, message", [
+    ({}, "needs either image or upload"),
+    ({"image": "/a", "upload": UPLOAD}, "needs either image or upload"),
+    ({"upload": "disk.img"}, "upload must be an object"),
+    ({"upload": {**UPLOAD, "path": "/x"}}, "upload does not take path"),
+    ({"upload": {"name": "disk.img", "size": 600}}, "upload needs sha256"),
+    ({"upload": {**UPLOAD, "size": True}}, "upload needs size"),
+    ({"upload": {**UPLOAD, "size": 0}}, "size must be more than 0"),
+    ({"upload": {**UPLOAD, "name": "../disk.img"}}, "without a directory"),
+    ({"upload": {**UPLOAD, "name": ".."}}, "without a directory"),
+    ({"upload": {**UPLOAD, "name": ""}}, "without a directory"),
+    ({"upload": {**UPLOAD, "name": "a\0b"}}, "without a directory"),
+    ({"upload": {**UPLOAD, "sha256": "AB" * 32}}, "64 lowercase hex digits"),
+    ({"upload": {**UPLOAD, "sha256": "ab"}}, "64 lowercase hex digits"),
+])
+def test_bad_uploads(args, message):
+    with pytest.raises(InvalidRequest, match=message):
+        commands.validate("storage.insert", args)

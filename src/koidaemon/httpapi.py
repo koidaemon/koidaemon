@@ -20,6 +20,12 @@ Requests and replies are the same JSON objects as on the socket:
 
     POST /v1/command    a request; the reply is the socket's reply
     GET  /v1/targets    the same as the targets command
+    POST /v1/upload     storage.insert with the image's contents as the
+                        body, and the request in a Koid-Request header
+
+A storage.insert sent to /v1/command with "upload" is answered
+{"ok": true, "send": SIZE} if the KVM needs the image; the client then
+sends it to /v1/upload.
 
 The HTTP status mirrors the reply: 200 when ok, otherwise 400 (invalid),
 401 (no or wrong token), 404 (unknown target), 422 (unsupported),
@@ -37,6 +43,7 @@ import ssl
 import threading
 
 from koidaemon.daemon import MAX_REQUEST, Daemon
+from koidaemon.uploads import READ_CHUNK
 
 LOG = logging.getLogger(__name__)
 
@@ -155,6 +162,9 @@ def _handler_class(daemon: Daemon, token: str) -> type:
         def do_POST(self) -> None:
             if not self._authorised():
                 return
+            if self.path == "/v1/upload":
+                self._upload()
+                return
             if self.path != "/v1/command":
                 self._error(404, "invalid", "no such path")
                 return
@@ -171,4 +181,52 @@ def _handler_class(daemon: Daemon, token: str) -> type:
                 return
             self._run(request)
 
+        def _upload(self) -> None:
+            """storage.insert, with the image as the body."""
+            length = self.headers.get("Content-Length", "")
+            header = self.headers.get("Koid-Request", "")
+            try:
+                request = json.loads(header)
+                upload = request["args"]["upload"]
+                size = upload["size"]
+            except (ValueError, KeyError, TypeError):
+                request = size = None
+            if (not isinstance(request, dict) or request.get("command") != "storage.insert"
+                    or not length.isdigit() or size != int(length)):
+                # The body cannot be told apart from a next request.
+                self.close_connection = True
+                self._error(400, "invalid", "an upload needs a Koid-Request header holding a "
+                                            "storage.insert with upload, and its size as the "
+                                            "Content-Length")
+                return
+
+            asked = []
+
+            def receive(wanted: int):
+                asked.append(wanted)
+                return self.rfile
+
+            reply = daemon.handle(request, receive)
+            if not asked:
+                if reply["ok"]:
+                    # The KVM already had the image; take the body anyway,
+                    # so that the client gets to read the reply.
+                    try:
+                        _discard(self.rfile, size)
+                    except OSError:
+                        self.close_connection = True
+                        return
+                else:
+                    self.close_connection = True
+            status = 200 if reply["ok"] else STATUS_FOR_ERROR.get(reply["error"]["code"], 500)
+            self._reply(status, reply)
+
     return Handler
+
+
+def _discard(stream, size: int) -> None:
+    while size > 0:
+        data = stream.read(min(size, READ_CHUNK))
+        if not data:
+            return
+        size -= len(data)

@@ -22,6 +22,7 @@ import pathlib
 from dataclasses import dataclass
 
 from koidaemon.errors import ConfigError, Unsupported
+from koidaemon.uploads import DiskImage
 
 # How setting types are named in error messages.
 KIND_NAMES = {str: "text", int: "a number", float: "a number", bool: "true or false"}
@@ -163,7 +164,9 @@ class Backend:
     def mouse_scroll(self, notches: int) -> None:
         raise Unsupported("%s has no mouse" % self.name)
 
-    def storage_insert(self, image: pathlib.Path, mode: str, writable: bool) -> dict:
+    def storage_insert(self, image: DiskImage, mode: str, writable: bool) -> dict:
+        """Present an image: a koidaemon.uploads.DiskImage, whose contents
+        are only to be read (with open()) if the KVM does not have it."""
         raise Unsupported("%s cannot emulate USB storage" % self.name)
 
     def storage_eject(self) -> None:

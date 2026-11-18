@@ -9,6 +9,7 @@
     koi = Client()      # the socket; Client(url=..., token=...) for HTTP
     koi.call("keyboard.type", "board-a", text="root\\n")
     snapshot = koi.snapshot("board-a")
+    koi.storage_insert("board-a", "installer.iso", mode="cdrom", push=True)
 
 Errors from the daemon are raised as the matching koidaemon.errors class.
 """
@@ -27,6 +28,7 @@ import urllib.request
 from koidaemon.backends.base import Snapshot
 from koidaemon.config import DEFAULT_SOCKET
 from koidaemon.errors import ERRORS_BY_CODE, KoiError
+from koidaemon.uploads import READ_CHUNK, file_digest
 
 
 def default_socket() -> pathlib.Path:
@@ -52,22 +54,57 @@ class Client:
 
     def call(self, command: str, target: str | None = None, **args) -> dict:
         """Run one command and return its result."""
+        return self._result(self._send(self._request(command, target, args)))
+
+    @staticmethod
+    def _request(command: str, target: str | None, args: dict) -> dict:
         request = {"command": command, "args": args}
         if target is not None:
             request["target"] = target
+        return request
 
+    def _send(self, request: dict, image: pathlib.Path | None = None) -> dict:
         if self.url:
             reply = self._call_http(request)
-        else:
-            reply = self._call_socket(request)
+            if image is not None and "send" in reply:
+                reply = self._upload_http(request, image)
+            return reply
+        return self._call_socket(request, image)
 
+    @staticmethod
+    def _result(reply: dict) -> dict:
         if reply.get("ok"):
             return reply.get("result", {})
         error = reply.get("error", {})
         error_class = ERRORS_BY_CODE.get(error.get("code"), KoiError)
         raise error_class(error.get("message", "unknown error"))
 
-    def _call_socket(self, request: dict) -> dict:
+    def storage_insert(self, target: str, image: str | os.PathLike, mode: str = "stick",
+                       writable: bool = False, push: bool = False) -> dict:
+        """Present a disk image to the target as a USB stick or CD.
+
+        Without push, koid opens the file itself, so it must see it at the
+        same path.  With push, the file's contents are sent to koid, and
+        only if the KVM does not already have them.
+        """
+        path = pathlib.Path(image).resolve()
+        args = {"mode": mode, "writable": writable}
+        if not push:
+            args["image"] = str(path)
+            return self.call("storage.insert", target, **args)
+
+        try:
+            args["upload"] = {
+                "name": path.name,
+                "size": path.stat().st_size,
+                "sha256": file_digest(path),
+            }
+        except OSError as error:
+            raise KoiError("cannot read %s: %s" % (path, error.strerror)) from error
+        request = self._request("storage.insert", target, args)
+        return self._result(self._send(request, path))
+
+    def _call_socket(self, request: dict, image: pathlib.Path | None = None) -> dict:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(self.timeout)
             try:
@@ -82,6 +119,9 @@ class Client:
                 connection.sendall(json.dumps(request).encode() + b"\n")
                 with connection.makefile("rb") as replies:
                     line = replies.readline()
+                    if image is not None and line and "send" in json.loads(line):
+                        _send_file(connection, image)
+                        line = replies.readline()
             except OSError:
                 # The daemon went away mid-request; treat it like no reply.
                 line = b""
@@ -91,14 +131,27 @@ class Client:
         return json.loads(line)
 
     def _call_http(self, request: dict) -> dict:
+        return self._post("/v1/command", json.dumps(request).encode(),
+                          {"Content-Type": "application/json"})
+
+    def _upload_http(self, request: dict, image: pathlib.Path) -> dict:
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(request["args"]["upload"]["size"]),
+            "Koid-Request": json.dumps(request),
+        }
+        try:
+            with open(image, "rb") as contents:
+                return self._post("/v1/upload", contents, headers)
+        except OSError as error:
+            raise KoiError("cannot read %s: %s" % (image, error.strerror)) from error
+
+    def _post(self, path: str, data, headers: dict) -> dict:
         http_request = urllib.request.Request(
-            self.url + "/v1/command",
-            data=json.dumps(request).encode(),
+            self.url + path,
+            data=data,
             method="POST",
-            headers={
-                "Authorization": "Bearer " + self.token,
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": "Bearer " + self.token, **headers},
         )
         context = None
         if self.url.startswith("https://"):
@@ -131,3 +184,12 @@ class Client:
         result = self.call("snapshot", target, format=format)
         data = base64.b64decode(result["data"])
         return Snapshot(result["format"], data, result.get("width"), result.get("height"))
+
+
+def _send_file(connection: socket.socket, path: pathlib.Path) -> None:
+    with open(path, "rb") as contents:
+        while True:
+            chunk = contents.read(READ_CHUNK)
+            if not chunk:
+                return
+            connection.sendall(chunk)

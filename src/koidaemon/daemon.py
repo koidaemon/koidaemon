@@ -15,6 +15,11 @@ and its reply, either
 
 A client may send several requests on one connection, one after another.
 docs/protocol.md lists the commands.
+
+storage.insert with "upload" instead of "image" has the client send the
+image's contents: if the KVM needs them, koid answers {"ok": true,
+"send": SIZE} first, the client sends exactly SIZE bytes, and koid then
+sends the reply.
 """
 
 from __future__ import annotations
@@ -32,12 +37,21 @@ import threading
 from koidaemon import commands, images
 from koidaemon.backends.base import Backend
 from koidaemon.errors import InvalidRequest, KoiError, UnknownTarget, Unsupported
+from koidaemon.uploads import LocalImage, PushedImage, SendImage
 
 LOG = logging.getLogger(__name__)
 
-# Requests are small (storage images are passed by path), so refuse
-# anything larger than this.
+# Requests are small (a pushed image's contents come after the request,
+# not in it), so refuse anything larger than this.
 MAX_REQUEST = 64 * 1024
+
+# How long a client sending an image may go quiet before koid gives up on
+# it.  The KVM stays locked while an image arrives.
+UPLOAD_IDLE_TIMEOUT = 60.0
+
+
+def _ask_for_another_request(size: int):
+    raise SendImage(size)
 
 
 class Daemon:
@@ -54,10 +68,18 @@ class Daemon:
     # Requests
     # ------------------------------------------------------------------
 
-    def handle(self, request) -> dict:
-        """Run one request and return the reply."""
+    def handle(self, request, receive=None) -> dict:
+        """Run one request and return the reply.
+
+        receive(size) is how a pushed image's contents are asked for: it
+        returns the stream they arrive on.  Without it, a request that
+        needs them is answered {"ok": true, "send": SIZE}, for the client
+        to send them in a request of their own.
+        """
         try:
-            result = self._run(request)
+            result = self._run(request, receive or _ask_for_another_request)
+        except SendImage as send:
+            return {"ok": True, "send": send.size}
         except KoiError as error:
             return {"ok": False, "error": {"code": error.code, "message": str(error)}}
         except Exception as error:
@@ -66,7 +88,7 @@ class Daemon:
             return {"ok": False, "error": {"code": "failed", "message": message}}
         return {"ok": True, "result": result}
 
-    def _run(self, request) -> dict:
+    def _run(self, request, receive) -> dict:
         if not isinstance(request, dict) or not isinstance(request.get("command"), str):
             raise InvalidRequest("a request is an object with a command")
         name = request["command"]
@@ -89,7 +111,7 @@ class Daemon:
 
         LOG.info("%s: %s", target, name)
         with self._locks[backend.resource]:
-            return self._dispatch(backend, name, args)
+            return self._dispatch(backend, name, args, receive)
 
     def _list_targets(self) -> dict:
         targets = {}
@@ -97,7 +119,7 @@ class Daemon:
             targets[name] = backend.describe()
         return {"targets": targets}
 
-    def _dispatch(self, backend: Backend, name: str, args: dict) -> dict:
+    def _dispatch(self, backend: Backend, name: str, args: dict, receive=None) -> dict:
         """Call the backend method for a validated command."""
         if name == "status":
             status = backend.status()
@@ -131,8 +153,7 @@ class Daemon:
         elif name == "mouse.scroll":
             backend.mouse_scroll(args["notches"])
         elif name == "storage.insert":
-            image = pathlib.Path(args["image"])
-            return backend.storage_insert(image, args["mode"], args["writable"])
+            return self._insert(backend, args, receive or _ask_for_another_request)
         elif name == "storage.eject":
             backend.storage_eject()
         elif name == "storage.status":
@@ -141,6 +162,23 @@ class Daemon:
             # commands.validate() only lets known commands through.
             raise InvalidRequest("unknown command %r" % name)
         return {}
+
+    def _insert(self, backend: Backend, args: dict, receive) -> dict:
+        if args["upload"] is None:
+            image = LocalImage(pathlib.Path(args["image"]))
+            return backend.storage_insert(image, args["mode"], args["writable"])
+
+        upload = args["upload"]
+        image = PushedImage(upload["name"], upload["size"], upload["sha256"], receive)
+        try:
+            return backend.storage_insert(image, args["mode"], args["writable"])
+        finally:
+            # If the backend stopped reading part way, take the rest of what
+            # the client sends so that the reply is not lost in it.
+            if image.reader is not None:
+                image.reader.drain()
+                if not image.reader.finished:
+                    _connection_lost(receive)
 
     # ------------------------------------------------------------------
     # Socket
@@ -155,7 +193,7 @@ class Daemon:
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self) -> None:
-                daemon._serve_connection(self.rfile, self.wfile)
+                daemon._serve_connection(self.rfile, self.wfile, self.connection)
 
         self._server = _Server(str(path), Handler)
         os.chmod(path, mode)
@@ -186,7 +224,7 @@ class Daemon:
         for backend in self.targets.values():
             backend.close()
 
-    def _serve_connection(self, rfile, wfile) -> None:
+    def _serve_connection(self, rfile, wfile, connection=None) -> None:
         while True:
             line = rfile.readline(MAX_REQUEST + 1)
             if not line:
@@ -195,14 +233,43 @@ class Daemon:
                 reply = {"ok": False, "error": {"code": "invalid", "message": "request too large"}}
                 wfile.write(json.dumps(reply).encode() + b"\n")
                 return
+            channel = _SocketChannel(rfile, wfile, connection)
             try:
                 request = json.loads(line)
             except ValueError:
                 reply = {"ok": False, "error": {"code": "invalid", "message": "not JSON"}}
             else:
-                reply = self.handle(request)
+                reply = self.handle(request, channel)
+            if connection is not None:
+                connection.settimeout(None)
             wfile.write(json.dumps(reply).encode() + b"\n")
             wfile.flush()
+            if channel.lost:
+                # Part of an image is still unread; nothing more on this
+                # connection can be understood.
+                return
+
+
+class _SocketChannel:
+    """Asks a socket client for a pushed image, on the same connection."""
+
+    def __init__(self, rfile, wfile, connection) -> None:
+        self._rfile = rfile
+        self._wfile = wfile
+        self._connection = connection
+        self.lost = False
+
+    def __call__(self, size: int):
+        self._wfile.write(json.dumps({"ok": True, "send": size}).encode() + b"\n")
+        self._wfile.flush()
+        if self._connection is not None:
+            self._connection.settimeout(UPLOAD_IDLE_TIMEOUT)
+        return self._rfile
+
+
+def _connection_lost(receive) -> None:
+    if isinstance(receive, _SocketChannel):
+        receive.lost = True
 
 
 class _Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):

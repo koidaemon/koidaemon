@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
+import io
 import pathlib
 import ssl
 import time
@@ -13,6 +14,7 @@ from koidaemon import keys
 from koidaemon.backends import pikvm
 from koidaemon.backends.base import Settings
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
+from koidaemon.uploads import LocalImage, PushedImage, UploadError
 
 from fake_kvmd import FakeKVMD, make_jpeg
 from fakes import make_certificate
@@ -462,13 +464,17 @@ def test_scroll_in_steps(kvmd, backend, notches, steps):
 # USB storage
 # ----------------------------------------------------------------------
 
+def insert(backend, path: pathlib.Path, mode: str, writable: bool) -> dict:
+    return backend.storage_insert(LocalImage(path), mode, writable)
+
+
 def stored_name(image: pathlib.Path) -> str:
     digest = hashlib.sha256(image.read_bytes()).hexdigest()
     return "koid-%s-disk_image.img" % digest[:12]
 
 
 def test_insert_a_stick(kvmd, backend, image):
-    status = backend.storage_insert(image, "stick", False)
+    status = insert(backend, image, "stick", False)
     name = stored_name(image)
     assert status == {"inserted": True, "image": name, "mode": "stick", "writable": False}
     assert kvmd.uploads[name] == image.read_bytes()
@@ -477,7 +483,7 @@ def test_insert_a_stick(kvmd, backend, image):
 
 def test_insert_waits_for_kvmd_to_list_the_upload(kvmd, backend, image):
     kvmd.unlisted_reads = 3
-    backend.storage_insert(image, "stick", False)
+    insert(backend, image, "stick", False)
     assert len(kvmd.calls("msd/set_params")) == 1
 
 
@@ -486,7 +492,7 @@ def test_an_upload_kvmd_never_lists(kvmd, backend, image, monkeypatch):
     monkeypatch.setattr(pikvm, "IMAGE_POLL_INTERVAL", 0.02)
     kvmd.unlisted_reads = 1000
     with pytest.raises(BackendError, match="did not list koid-.* after it was uploaded"):
-        backend.storage_insert(image, "stick", False)
+        insert(backend, image, "stick", False)
     assert kvmd.calls("msd/set_params") == []
 
 
@@ -494,38 +500,38 @@ def test_a_cd_too_small_for_the_pikvm(kvmd, backend, tmp_path):
     small = tmp_path / "small.iso"
     small.write_bytes(b"\x00" * (pikvm.MIN_CD_SIZE - 1))
     with pytest.raises(InvalidRequest, match="too small to be a CD.*600 KiB"):
-        backend.storage_insert(small, "cdrom", False)
+        insert(backend, small, "cdrom", False)
     assert kvmd.uploads == {}
 
 
 def test_insert_a_cd(kvmd, backend, image):
-    status = backend.storage_insert(image, "cdrom", False)
+    status = insert(backend, image, "cdrom", False)
     assert status["mode"] == "cdrom"
     assert kvmd.drive["cdrom"] is True
 
 
 def test_insert_a_writable_stick(kvmd, backend, image):
-    assert backend.storage_insert(image, "stick", True)["writable"] is True
+    assert insert(backend, image, "stick", True)["writable"] is True
     assert kvmd.drive["rw"] is True
 
 
 def test_an_image_already_on_the_pikvm_is_not_uploaded_again(kvmd, backend, image):
-    backend.storage_insert(image, "stick", False)
-    backend.storage_insert(image, "cdrom", False)
+    insert(backend, image, "stick", False)
+    insert(backend, image, "cdrom", False)
     assert len(kvmd.calls("msd/write")) == 1
 
 
 def test_a_changed_image_is_uploaded_again(kvmd, backend, image):
-    backend.storage_insert(image, "stick", False)
+    insert(backend, image, "stick", False)
     image.write_bytes(b"\x01" * 600)
-    backend.storage_insert(image, "stick", False)
+    insert(backend, image, "stick", False)
     assert len(kvmd.calls("msd/write")) == 2
 
 
 def test_insert_disconnects_the_drive_first(kvmd, backend, image):
-    backend.storage_insert(image, "stick", False)
+    insert(backend, image, "stick", False)
     # The fake refuses set_params while connected, as kvmd does.
-    backend.storage_insert(image, "cdrom", False)
+    insert(backend, image, "cdrom", False)
     connects = [request.query["connected"] for request in kvmd.calls("msd/set_connected")]
     assert connects == ["1", "0", "1"]
 
@@ -533,36 +539,36 @@ def test_insert_disconnects_the_drive_first(kvmd, backend, image):
 def test_an_image_too_big_for_a_cd(kvmd, backend, image):
     kvmd.cdrom_limit = 100
     with pytest.raises(BackendError, match="would not present disk image.img as a cdrom"):
-        backend.storage_insert(image, "cdrom", False)
+        insert(backend, image, "cdrom", False)
 
 
 def test_a_drive_that_does_not_connect(kvmd, backend, image):
     kvmd.ignore_connect = True
     with pytest.raises(BackendError, match="did not connect"):
-        backend.storage_insert(image, "stick", False)
+        insert(backend, image, "stick", False)
 
 
 def test_a_drive_that_stays_read_only(kvmd, backend, image):
     kvmd.refuse_writable = True
     with pytest.raises(BackendError, match="would not make disk image.img writable"):
-        backend.storage_insert(image, "stick", True)
+        insert(backend, image, "stick", True)
 
 
 def test_missing_image(backend, tmp_path):
     with pytest.raises(BackendError, match="cannot read"):
-        backend.storage_insert(tmp_path / "missing.img", "stick", False)
+        insert(backend, tmp_path / "missing.img", "stick", False)
 
 
 def test_storage_disabled(kvmd, backend, image):
     kvmd.msd_enabled = False
     with pytest.raises(Unsupported, match="no mass storage drive"):
-        backend.storage_insert(image, "stick", False)
+        insert(backend, image, "stick", False)
     with pytest.raises(Unsupported):
         backend.storage_status()
 
 
 def test_eject(kvmd, backend, image):
-    backend.storage_insert(image, "stick", False)
+    insert(backend, image, "stick", False)
     backend.storage_eject()
     assert kvmd.drive["connected"] is False
     assert backend.storage_status()["inserted"] is False
@@ -578,6 +584,48 @@ def test_status_with_nothing_inserted(backend):
                                         "writable": False}
 
 
+def pushed(contents: bytes, sent: bytes | None = None) -> PushedImage:
+    """An image a client pushes: contents is what it announces, sent what
+    actually arrives."""
+    stream = io.BytesIO(contents if sent is None else sent)
+    return PushedImage("disk image.img", len(contents),
+                       hashlib.sha256(contents).hexdigest(), lambda size: stream)
+
+
+def test_insert_a_pushed_image(kvmd, backend):
+    contents = bytes(range(256)) * 300
+    image = pushed(contents)
+    status = backend.storage_insert(image, "stick", False)
+    name = "koid-%s-disk_image.img" % hashlib.sha256(contents).hexdigest()[:12]
+    assert status["image"] == name
+    assert kvmd.uploads[name] == contents
+    assert image.reader.finished
+
+
+def test_a_pushed_image_already_on_the_pikvm_is_not_read(kvmd, backend, image):
+    contents = image.read_bytes()
+    insert(backend, image, "stick", False)
+    pushed_again = pushed(contents)
+    backend.storage_insert(pushed_again, "cdrom", False)
+    assert pushed_again.reader is None
+    assert len(kvmd.calls("msd/write")) == 1
+
+
+def test_a_pushed_image_that_does_not_match_is_not_kept(kvmd, backend):
+    contents = b"a" * 100000
+    with pytest.raises(UploadError, match="does not match"):
+        backend.storage_insert(pushed(contents, b"b" * 100000), "stick", False)
+    assert kvmd.images == {}
+    assert kvmd.calls("msd/set_params") == []
+
+
+def test_a_pushed_image_that_ends_short_is_not_kept(kvmd, backend):
+    contents = b"a" * 100000
+    with pytest.raises(UploadError, match="short"):
+        backend.storage_insert(pushed(contents, contents[:5000]), "stick", False)
+    assert kvmd.images == {}
+
+
 def test_image_names_are_safe():
-    name = pikvm.image_name(pathlib.Path("/x/My Disk (1).iso"), "abcdef0123456789")
+    name = pikvm.image_name("My Disk (1).iso", "abcdef0123456789")
     assert name == "koid-abcdef012345-My_Disk__1_.iso"

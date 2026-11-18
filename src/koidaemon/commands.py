@@ -16,6 +16,7 @@ of koidaemon.keys.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -38,6 +39,8 @@ MOUSE_BUTTONS = ("left", "right", "middle")
 STORAGE_MODES = ("stick", "cdrom")
 MAX_CLICKS = 10
 MAX_SCROLL = 100
+MAX_IMAGE_NAME = 255
+UPLOAD_FIELDS = {"name": str, "size": int, "sha256": str}
 
 
 @dataclass(frozen=True)
@@ -102,7 +105,9 @@ COMMANDS = {command.name: command for command in (
     # storage.insert needs storage.stick or storage.cdrom depending on its
     # mode; see required_capability().
     Command("storage.insert", "present a disk image to the target over USB", STORAGE_STICK, (
-        Argument("image", str, "absolute path of the image, readable by koid", required=True),
+        Argument("image", str, "absolute path of the image, readable by koid"),
+        Argument("upload", dict, "the image's name, size and sha256, for a client that "
+                                 "sends its contents instead of a path"),
         Argument("mode", str, "as a USB stick or a CD drive", default="stick",
                  choices=STORAGE_MODES),
         Argument("writable", bool, "let the target write to it (sticks only)", default=False),
@@ -113,7 +118,8 @@ COMMANDS = {command.name: command for command in (
 
 
 # How argument types are named in error messages.
-KIND_NAMES = {str: "text", int: "a whole number", bool: "true or false", list: "a list"}
+KIND_NAMES = {str: "text", int: "a whole number", bool: "true or false", list: "a list",
+              dict: "an object"}
 
 
 def _check_type(argument: Argument, value: Any) -> None:
@@ -185,10 +191,34 @@ def _check_meaning(name: str, args: dict) -> None:
         raise InvalidRequest("notches must be within ±%d" % MAX_SCROLL)
 
     if name == "storage.insert":
-        if not os.path.isabs(args["image"]):
+        if (args["image"] is None) == (args["upload"] is None):
+            raise InvalidRequest("storage.insert needs either image or upload")
+        if args["image"] is not None and not os.path.isabs(args["image"]):
             raise InvalidRequest("image must be an absolute path (koid resolves it, not koictl)")
+        if args["upload"] is not None:
+            _check_upload(args["upload"])
         if args["mode"] == "cdrom" and args["writable"]:
             raise InvalidRequest("a CD drive cannot be writable")
+
+
+def _check_upload(upload: dict) -> None:
+    """The description of an image a client will send."""
+    unknown = sorted(set(upload) - set(UPLOAD_FIELDS))
+    if unknown:
+        raise InvalidRequest("upload does not take %s" % ", ".join(unknown))
+    for field, kind in UPLOAD_FIELDS.items():
+        value = upload.get(field)
+        if not isinstance(value, kind) or isinstance(value, bool):
+            raise InvalidRequest("upload needs %s, as %s" % (field, KIND_NAMES[kind]))
+
+    name = upload["name"]
+    if (not name or len(name) > MAX_IMAGE_NAME or name in (".", "..")
+            or "/" in name or "\0" in name):
+        raise InvalidRequest("upload name must be a file name, without a directory")
+    if upload["size"] <= 0:
+        raise InvalidRequest("upload size must be more than 0")
+    if not re.match(r"^[0-9a-f]{64}$", upload["sha256"]):
+        raise InvalidRequest("upload sha256 must be 64 lowercase hex digits")
 
 
 def required_capability(name: str, args: dict) -> str | None:

@@ -27,7 +27,6 @@ certificate as ca_file (better) or set verify_tls = false.
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import logging
 import pathlib
@@ -41,6 +40,7 @@ import urllib.request
 from koidaemon import commands, keys
 from koidaemon.backends.base import Backend, Settings, Snapshot
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
+from koidaemon.uploads import DiskImage, UploadError
 from koidaemon.websocket import WebSocket, WebSocketError
 
 LOG = logging.getLogger(__name__)
@@ -66,7 +66,6 @@ VIDEO_POLL_INTERVAL = 0.25
 # Uploaded images are named after their contents, so an image that is
 # already on the PiKVM is not uploaded again.
 IMAGE_PREFIX = "koid-"
-HASH_CHUNK = 1024 * 1024
 
 # Linux's USB mass storage gadget will not present a CD smaller than 300
 # sectors of 2048 bytes; kvmd then fails with a bare HTTP 500.
@@ -112,21 +111,10 @@ def to_mouse_range(position: int, size: int) -> int:
     return MOUSE_MIN + round(position * (MOUSE_MAX - MOUSE_MIN) / (size - 1))
 
 
-def image_name(path: pathlib.Path, digest: str) -> str:
+def image_name(file_name: str, digest: str) -> str:
     """The name an image is stored under on the PiKVM."""
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", path.name)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", file_name)
     return "%s%s-%s" % (IMAGE_PREFIX, digest[:12], safe)
-
-
-def file_digest(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as image:
-        while True:
-            chunk = image.read(HASH_CHUNK)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 class PiKVMBackend(Backend):
@@ -451,31 +439,42 @@ class PiKVMBackend(Backend):
         if drive.get("connected"):
             self._json("POST", "msd/set_connected", {"connected": "0"})
 
-    def _upload(self, path: pathlib.Path, name: str) -> None:
-        size = path.stat().st_size
-        LOG.info("%s: uploading %s (%d bytes) as %s", self.target, path, size, name)
+    def _upload(self, image: DiskImage, name: str) -> None:
+        LOG.info("%s: uploading %s (%d bytes) as %s", self.target, image.name, image.size, name)
         headers = {
             "Content-Type": "application/octet-stream",
-            "Content-Length": str(size),
+            "Content-Length": str(image.size),
         }
+        # kvmd deletes an image whose upload stops short.
         query = {"image": name, "remove_incomplete": "1"}
-        with open(path, "rb") as image:
-            self._json("POST", "msd/write", query, body=image, headers=headers)
-
-    def storage_insert(self, image: pathlib.Path, mode: str, writable: bool) -> dict:
+        contents = image.open()
         try:
-            size = image.stat().st_size
-            digest = file_digest(image)
-        except OSError as error:
-            raise BackendError("cannot read %s: %s" % (image, error.strerror)) from error
-        if mode == "cdrom" and size < MIN_CD_SIZE:
+            self._json("POST", "msd/write", query, body=contents, headers=headers)
+        except UploadError:
+            # Cut short on purpose; make sure nothing half-written stays.
+            self._remove(name)
+            raise
+        finally:
+            close = getattr(contents, "close", None)
+            if close is not None:
+                close()
+
+    def _remove(self, name: str) -> None:
+        try:
+            self._json("POST", "msd/remove", {"image": name})
+        except BackendError:
+            pass
+
+    def storage_insert(self, image: DiskImage, mode: str, writable: bool) -> dict:
+        if mode == "cdrom" and image.size < MIN_CD_SIZE:
             raise InvalidRequest("%s is too small to be a CD: the PiKVM needs at least %d KiB"
                                  % (image.name, MIN_CD_SIZE // 1024))
+        digest = image.digest()
 
         state = self._msd()
         self._disconnect(state)
 
-        name = image_name(image, digest)
+        name = image_name(image.name, digest)
         stored = (state.get("storage") or {}).get("images", {})
         if name not in stored or not stored[name].get("complete", True):
             self._upload(image, name)

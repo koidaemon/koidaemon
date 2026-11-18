@@ -20,6 +20,7 @@ from PIL import Image
 
 from koidaemon import commands
 from koidaemon.backends.base import Backend, Snapshot
+from koidaemon.uploads import LocalImage
 
 def make_picture(width: int, height: int, picture_format: str = "PNG") -> bytes:
     """A picture with something on it: a gradient with a block of white."""
@@ -47,6 +48,10 @@ class RecordingBackend(Backend):
         self.calls: list[tuple] = []
         # Set to an exception to make every call raise it.
         self.error: Exception | None = None
+        # For pushed images: whether the KVM already has them, and how
+        # much to read at a time.
+        self.has_image = False
+        self.read_size = 4096
 
     @property
     def resource(self) -> str:
@@ -92,8 +97,23 @@ class RecordingBackend(Backend):
     def mouse_scroll(self, notches):
         self._record("mouse_scroll", notches)
 
-    def storage_insert(self, image: pathlib.Path, mode, writable):
-        self._record("storage_insert", image, mode, writable)
+    def storage_insert(self, image, mode, writable):
+        """Records a local image by its path; reads a pushed one, unless
+        has_image says the KVM already has it, and records its contents."""
+        if isinstance(image, LocalImage):
+            seen = image.path
+        elif self.has_image:
+            seen = ("pushed", image.name, None)
+        else:
+            reader = image.open()
+            contents = b""
+            while True:
+                chunk = reader.read(self.read_size)
+                if not chunk:
+                    break
+                contents += chunk
+            seen = ("pushed", image.name, contents)
+        self._record("storage_insert", seen, mode, writable)
         return {"inserted": True, "image": image.name, "mode": mode, "writable": writable}
 
     def storage_eject(self):

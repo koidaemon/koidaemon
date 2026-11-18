@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import http.server
 import json
+import sys
 import threading
 import urllib.parse
 from dataclasses import dataclass
@@ -38,6 +39,13 @@ class Request:
     query: dict
     headers: object         # case-insensitive, as HTTP headers are
     body: bytes
+
+
+class _QuietServer(http.server.ThreadingHTTPServer):
+    def handle_error(self, request, client_address) -> None:
+        # Clients that give up on an upload leave nobody to answer.
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(request, client_address)
 
 
 class FakeKVMD:
@@ -94,7 +102,7 @@ class FakeKVMD:
             def do_POST(self) -> None:
                 fake._handle(self, "POST")
 
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server = _QuietServer(("127.0.0.1", 0), Handler)
         # A short poll interval makes shutting down quick.
         self._thread = threading.Thread(target=self._server.serve_forever, args=(0.02,),
                                         daemon=True)
@@ -286,11 +294,27 @@ class FakeKVMD:
 
     def _route_msd_write(self, handler, request) -> None:
         name = request.query["image"]
+        expected = int(request.headers.get("Content-Length") or 0)
+        if len(request.body) < expected:
+            # The upload was cut short.  Like kvmd, drop it if asked to.
+            if request.query.get("remove_incomplete") != "1":
+                self.images[name] = {"size": len(request.body), "complete": False}
+            self._fail(handler, "MsdWriteError", "the upload stopped short")
+            return
         self.images[name] = {"size": len(request.body), "complete": True}
         self.uploads[name] = request.body
         if self.unlisted_reads:
             self._unlisted[name] = self.unlisted_reads
         self._ok(handler, {"image": {"name": name, "size": len(request.body), "written": 0}})
+
+    def _route_msd_remove(self, handler, request) -> None:
+        name = request.query.get("image")
+        if name not in self.images:
+            self._fail(handler, "MsdUnknownImageError", "no such image")
+            return
+        del self.images[name]
+        self.uploads.pop(name, None)
+        self._ok(handler)
 
     def _route_msd_set_params(self, handler, request) -> None:
         if self.drive["connected"]:

@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import hashlib
 import http.client
 import json
 import logging
@@ -214,3 +215,86 @@ def test_https(backend, certificate):
             doubting.targets()
     finally:
         http_api.stop()
+
+
+# ----------------------------------------------------------------------
+# Pushed images
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def storage_api():
+    backend = RecordingBackend(capabilities={"storage.stick", "storage.cdrom"})
+    http_api = HTTPApi(Daemon({"board": backend}), "127.0.0.1:0", TOKEN)
+    http_api.start(0.02)
+    yield http_api, backend
+    http_api.stop()
+
+
+def client_for(api) -> Client:
+    host, port = api.address
+    return Client(url="http://%s:%d" % (host, port), token=TOKEN)
+
+
+def insert_request(contents: bytes) -> dict:
+    upload = {"name": "disk.img", "size": len(contents),
+              "sha256": hashlib.sha256(contents).hexdigest()}
+    return {"command": "storage.insert", "target": "board", "args": {"upload": upload}}
+
+
+def test_client_pushes_an_image_over_http(storage_api, tmp_path):
+    api, backend = storage_api
+    contents = bytes(range(256)) * 40
+    image = tmp_path / "disk.img"
+    image.write_bytes(contents)
+    status = client_for(api).storage_insert("board", image, mode="cdrom", push=True)
+    assert status["mode"] == "cdrom"
+    assert backend.calls == [("storage_insert", ("pushed", "disk.img", contents), "cdrom", False)]
+
+
+def test_an_image_the_kvm_has_is_not_sent_over_http(storage_api, tmp_path):
+    api, backend = storage_api
+    image = tmp_path / "disk.img"
+    image.write_bytes(b"x" * 600)
+    backend.has_image = True
+    client_for(api).storage_insert("board", image, push=True)
+    assert backend.calls == [("storage_insert", ("pushed", "disk.img", None), "stick", False)]
+
+
+def test_command_asks_for_the_image(storage_api):
+    api, backend = storage_api
+    status, reply = send(api, "POST", "/v1/command", json.dumps(insert_request(b"x" * 600)))
+    assert (status, reply) == (200, {"ok": True, "send": 600})
+    assert backend.calls == []
+
+
+def test_upload_of_an_image_that_does_not_match(storage_api):
+    api, backend = storage_api
+    headers = {"Koid-Request": json.dumps(insert_request(b"a" * 600)),
+               "Content-Type": "application/octet-stream"}
+    status, reply = send(api, "POST", "/v1/upload", b"b" * 600, headers=headers)
+    assert status == 500
+    assert reply["error"]["message"] == "the image does not match its SHA-256"
+
+
+@pytest.mark.parametrize("koid_request, body", [
+    (None, b"x" * 600),
+    ("not json", b"x" * 600),
+    (json.dumps({"command": "keyboard.type", "target": "board", "args": {"text": "x"}}),
+     b"x" * 600),
+    # The body's length must be the size announced.
+    (json.dumps(insert_request(b"x" * 600)), b"x" * 599),
+])
+def test_bad_uploads(storage_api, koid_request, body):
+    api, backend = storage_api
+    headers = {} if koid_request is None else {"Koid-Request": koid_request}
+    status, reply = send(api, "POST", "/v1/upload", body, headers=headers)
+    assert status == 400
+    assert "Koid-Request" in reply["error"]["message"]
+    assert backend.calls == []
+
+
+def test_upload_needs_the_token(storage_api):
+    api, _backend = storage_api
+    headers = {"Koid-Request": json.dumps(insert_request(b"x" * 600))}
+    status, _reply = send(api, "POST", "/v1/upload", b"x" * 600, token=None, headers=headers)
+    assert status == 401

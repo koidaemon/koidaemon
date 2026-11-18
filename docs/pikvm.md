@@ -3,7 +3,9 @@
 For [PiKVM](https://pikvm.org), and other devices running its kvmd daemon
 and HTTP API. Tested with a PiKVM V4 Mini running kvmd 4.61, on a board
 running Debian with a 1920x1080 console: every command, with USB storage
-checked from the board as a stick and from the PiKVM as a CD.
+checked from the board as a stick and from the PiKVM as a CD. kvmd 4.10
+(a PiKVM v2) has the same API for everything koid uses; `status`,
+`storage.status` and the video check were run against one.
 
 | | |
 |---|---|
@@ -44,7 +46,7 @@ Every request carries the `X-KVMD-User` and `X-KVMD-Passwd` headers.
 | `mouse.move` | `POST /api/hid/events/send_mouse_move` |
 | `mouse.click`, `.down`, `.up` | `POST /api/hid/events/send_mouse_button` |
 | `mouse.scroll` | `POST /api/hid/events/send_mouse_wheel`, at most 127 per request |
-| `storage.*` | `/api/msd` and its `write`, `set_params` and `set_connected` |
+| `storage.*` | `/api/msd` and its `write`, `remove`, `set_params` and `set_connected` |
 
 kvmd's `send_shortcut` would press a whole combination in one request,
 but older kvmd versions do not have it, so koid sends the keys one by one.
@@ -95,7 +97,11 @@ it:
 2. uploads the image, named `koid-<first 12 hex digits of its SHA-256>-<file name>`,
    unless an image with that name is already there, and waits for kvmd to
    list it (kvmd finds new images by watching its storage, so cannot use
-   one for a moment after it is uploaded);
+   one for a moment after it is uploaded). A pushed image
+   (`koictl storage insert --push-file`) goes straight from the client
+   through koid to the PiKVM, and only if the PiKVM does not have it; if
+   its contents do not match its SHA-256, the upload is cut short and
+   kvmd drops it;
 3. sets it as a stick or CD, read-only or writable;
 4. connects the drive, and checks that kvmd did what was asked.
 

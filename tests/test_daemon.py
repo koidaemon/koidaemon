@@ -4,6 +4,7 @@
 
 import base64
 import grp
+import hashlib
 import json
 import os
 import pathlib
@@ -319,3 +320,108 @@ def test_socket_path_too_long(tmp_path):
     long_path = tmp_path / ("x" * 120) / "koid.sock"
     with pytest.raises(KoiError, match="cannot connect to koid at .*: AF_UNIX path too long"):
         Client(long_path).call("targets")
+
+
+# ----------------------------------------------------------------------
+# Pushed images
+# ----------------------------------------------------------------------
+
+def upload_request(contents: bytes, name: str = "disk.img", **args) -> dict:
+    upload = {"name": name, "size": len(contents),
+              "sha256": hashlib.sha256(contents).hexdigest()}
+    return request("storage.insert", upload=upload, **args)
+
+
+def test_a_pushed_image_without_a_way_to_receive_it(daemon, backend):
+    # As over HTTP's /v1/command: the client is told to send it separately.
+    reply = daemon.handle(upload_request(b"x" * 600))
+    assert reply == {"ok": True, "send": 600}
+    assert backend.calls == []
+
+
+def test_client_pushes_an_image_over_the_socket(served, backend, tmp_path):
+    _daemon, client, _path = served
+    contents = bytes(range(256)) * 50
+    image = tmp_path / "disk.img"
+    image.write_bytes(contents)
+    backend.read_size = 1000
+
+    status = client.storage_insert("board", image, mode="stick", writable=True, push=True)
+
+    assert status["image"] == "disk.img"
+    assert backend.calls == [("storage_insert", ("pushed", "disk.img", contents), "stick", True)]
+
+
+def test_an_image_the_kvm_has_is_not_sent(served, backend, tmp_path):
+    _daemon, client, _path = served
+    image = tmp_path / "disk.img"
+    image.write_bytes(b"x" * 600)
+    backend.has_image = True
+    client.storage_insert("board", image, push=True)
+    assert backend.calls == [("storage_insert", ("pushed", "disk.img", None), "stick", False)]
+
+
+def test_client_sends_a_path_by_default(served, backend, tmp_path):
+    _daemon, client, _path = served
+    image = tmp_path / "disk.img"
+    image.write_bytes(b"x" * 600)
+    client.storage_insert("board", image)
+    assert backend.calls == [("storage_insert", image, "stick", False)]
+
+
+def push_raw(path: pathlib.Path, announced: bytes, sent: bytes, shut: bool = False):
+    """Push sent while announcing announced; return the replies, and a
+    status request's reply on the same connection afterwards (or None)."""
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(str(path))
+        replies = connection.makefile("rb")
+        connection.sendall(json.dumps(upload_request(announced)).encode() + b"\n")
+        first = json.loads(replies.readline())
+        connection.sendall(sent)
+        if shut:
+            connection.shutdown(socket.SHUT_WR)
+        reply = json.loads(replies.readline())
+        after = None
+        if not shut:
+            connection.sendall(json.dumps(request("status")).encode() + b"\n")
+            line = replies.readline()
+            after = json.loads(line) if line else None
+    return first, reply, after
+
+
+def test_an_image_that_does_not_match_its_digest(served, backend):
+    _daemon, _client, path = served
+    first, reply, after = push_raw(path, b"a" * 600, b"b" * 600)
+    assert first == {"ok": True, "send": 600}
+    assert reply["error"] == {"code": "failed", "message": "the image does not match its SHA-256"}
+    # Every byte was read, so the connection carries on.
+    assert after["ok"] is True
+
+
+def test_an_image_that_ends_short(served, backend):
+    _daemon, _client, path = served
+    _first, reply, _after = push_raw(path, b"a" * 600, b"a" * 100, shut=True)
+    assert reply["error"]["message"] == "the image ended 500 bytes short"
+
+
+class GivesUpBackend(RecordingBackend):
+    """Reads part of a pushed image, then fails, as a KVM might."""
+
+    def storage_insert(self, image, mode, writable):
+        image.open().read(100)
+        raise BackendError("the KVM is full")
+
+
+def test_the_rest_of_an_image_is_read_when_the_backend_fails():
+    daemon = Daemon({"board": GivesUpBackend()})
+    path = short_socket_path()
+    daemon.listen(path)
+    threading.Thread(target=daemon.serve_forever, args=(0.02,), daemon=True).start()
+    try:
+        contents = b"c" * 5000
+        _first, reply, after = push_raw(path, contents, contents)
+    finally:
+        daemon.shutdown()
+        daemon.close()
+    assert reply["error"]["message"] == "the KVM is full"
+    assert after["ok"] is True

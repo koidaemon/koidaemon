@@ -16,7 +16,8 @@ A request names a command, the target, and the command's arguments:
 {"command": "keyboard.press", "target": "board-a", "args": {"keys": ["ctrl+alt+delete"]}}
 ```
 
-The reply is either a result or an error:
+The reply is either a result or an error (with one exception: a pushed
+storage image, below):
 
 ```json
 {"ok": true, "result": {}}
@@ -33,10 +34,35 @@ Error codes:
 | `busy` | the KVM is in use elsewhere; trying again later can work |
 | `failed` | the KVM could not do it |
 
+### Pushing a storage image
+
+A `storage.insert` with `upload` instead of `image` sends the image's
+contents after the request, on the same connection. If the KVM needs
+them, koid first answers
+
+```json
+{"ok": true, "send": 1048576}
+```
+
+and the client sends exactly that many bytes, raw, straight after it;
+then koid sends the reply as usual. If the KVM already has the image,
+koid sends the reply straight away and the client sends nothing.
+
+koid checks the bytes against the SHA-256 as they arrive, and the KVM
+does not keep an image that fails the check. If the KVM fails part way,
+koid still reads the rest before replying. A client that stops sending
+for 60 seconds is given up on, and its connection closed.
+
 ## Over HTTP
 
 `POST /v1/command` takes a request as its body and returns the reply.
-`GET /v1/targets` is the `targets` command. Every request needs the
+`GET /v1/targets` is the `targets` command.
+
+A pushed storage image takes two requests. `POST /v1/command` with the
+`storage.insert` answers `{"ok": true, "send": SIZE}` if the KVM needs the
+image. The client then sends `POST /v1/upload` with the same request,
+as JSON, in a `Koid-Request` header, and the image as the body
+(`Content-Length` must be the size). Its reply is the request's reply. Every request needs the
 configured token as `Authorization: Bearer TOKEN`; without it the reply is
 401 with the code `unauthorised`.
 
@@ -162,8 +188,12 @@ Needs `storage.stick`, or `storage.cdrom` for a CD.
 | Argument | Type | |
 |---|---|---|
 | `image` | string | absolute path of the image on the machine running koid |
+| `upload` | object | instead of `image`: the image the client will send, as `{"name": "disk.img", "size": 1048576, "sha256": "<64 hex digits>"}` |
 | `mode` | `stick` or `cdrom` | optional; default `stick` |
 | `writable` | true or false | optional; default false; sticks only |
+
+Give either `image` or `upload`. With `upload`, the `name` is a file name
+only, with no directory; see "Pushing a storage image" above.
 
 Replaces whatever was presented before. Returns the same as
 `storage.status`.

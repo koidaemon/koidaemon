@@ -137,7 +137,8 @@ def _koictl_parser() -> argparse.ArgumentParser:
                "  koictl -t board-a keyboard press ctrl+alt+delete\n"
                "  koictl -t board-a mouse click --at 640 400\n"
                "  koictl -t board-a snapshot screen.jpg\n"
-               "  koictl -t board-a storage insert --cdrom installer.iso",
+               "  koictl -t board-a storage insert --cdrom installer.iso\n"
+               "  koictl -t board-a storage insert --push-file disk.img",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-t", "--target", default=os.environ.get("KOI_TARGET"),
                         help="the target (default: $KOI_TARGET)")
@@ -194,6 +195,9 @@ def _koictl_parser() -> argparse.ArgumentParser:
     insert.add_argument("image", type=pathlib.Path)
     insert.add_argument("--cdrom", action="store_true", help="as a CD drive, not a USB stick")
     insert.add_argument("--writable", action="store_true", help="let the target write to it")
+    insert.add_argument("--push-file", action="store_true",
+                        help="send the file's contents to koid, for when koid cannot read "
+                             "this machine's files (by default koid opens the file itself)")
     storage_actions.add_parser("eject", help="disconnect the drive")
     storage_actions.add_parser("status", help="what the drive is presenting")
     return parser
@@ -226,11 +230,11 @@ def _request(args: argparse.Namespace) -> tuple[str, dict]:
         return name, {"notches": args.notches}
 
     if name == "storage.insert":
-        # koid opens the image, so send a path it can resolve.
         return name, {
-            "image": str(args.image.resolve()),
+            "image": args.image,
             "mode": "cdrom" if args.cdrom else "stick",
             "writable": args.writable,
+            "push": args.push_file,
         }
     return name, {}
 
@@ -279,7 +283,10 @@ def koictl_main(argv: list[str] | None = None) -> int:
         if name == "snapshot":
             _save_snapshot(client, target, args.output, args.format)
             return 0
-        result = client.call(name, target, **request)
+        if name == "storage.insert":
+            result = client.storage_insert(target, **request)
+        else:
+            result = client.call(name, target, **request)
     except Unsupported as error:
         print("koictl: %s" % error, file=sys.stderr)
         return EXIT_UNSUPPORTED

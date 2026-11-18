@@ -88,6 +88,21 @@ def test_writable_stick(socket_path, backend):
     assert backend.calls == [("storage_insert", pathlib.Path("/images/disk.img"), "stick", True)]
 
 
+def test_push_file(socket_path, backend, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "disk.img").write_bytes(b"d" * 6000)
+    assert koictl(socket_path, "storage", "insert", "--push-file", "disk.img") == 0
+    assert backend.calls == [("storage_insert", ("pushed", "disk.img", b"d" * 6000),
+                              "stick", False)]
+
+
+def test_push_file_that_is_missing(socket_path, backend, tmp_path, capsys):
+    assert koictl(socket_path, "storage", "insert", "--push-file",
+                  str(tmp_path / "missing.img")) == cli.EXIT_FAILED
+    assert "cannot read" in capsys.readouterr().err
+    assert backend.calls == []
+
+
 def test_results_are_printed_as_json(socket_path, capsys):
     assert koictl(socket_path, "status") == 0
     assert json.loads(capsys.readouterr().out)["online"] is True
