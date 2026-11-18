@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from koidaemon import keys
+from koidaemon import images, keys
 from koidaemon.backends import pikvm
 from koidaemon.backends.base import Settings
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
@@ -210,9 +210,9 @@ def test_watching_with_the_wrong_password(tmp_path, kvmd, backend, monkeypatch):
 
 
 def test_jpeg_size():
-    assert pikvm.jpeg_size(make_jpeg(800, 600)) == (800, 600)
+    assert images.jpeg_size(make_jpeg(800, 600)) == (800, 600)
     progressive = make_jpeg(640, 480).replace(b"\xff\xc0", b"\xff\xc2")
-    assert pikvm.jpeg_size(progressive) == (640, 480)
+    assert images.jpeg_size(progressive) == (640, 480)
 
 
 @pytest.mark.parametrize("data", [
@@ -221,7 +221,7 @@ def test_jpeg_size():
     b"\xff\xd8\xff\xd9",                # ends before any frame header
 ])
 def test_jpeg_size_without_a_frame_header(data):
-    assert pikvm.jpeg_size(data) is None
+    assert images.jpeg_size(data) is None
 
 
 def test_snapshot_that_is_not_a_jpeg(kvmd, backend):
