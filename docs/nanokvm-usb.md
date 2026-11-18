@@ -7,6 +7,11 @@ mouse are driven through a serial port. koid talks to both directly, so
 Sipeed's browser or desktop client is not needed (and must not hold the
 serial port while koid uses it).
 
+Tested on a Debian arm64 host with a NanoKVM-USB (CH9329 chip V1.8) in
+front of a Radxa Dragon Q8B: snapshots, and the keyboard in the board's
+UEFI setup menus and UEFI Shell. The mouse has not been tried on a
+target yet, since UEFI there has no pointer.
+
 | | |
 |---|---|
 | Keyboard | yes, at most 6 keys besides the modifiers held at once |
@@ -24,6 +29,7 @@ video = "/dev/v4l/by-id/usb-MACROSILICON_USB3_Video_87538134-video-index0"
 width = 1920                       # optional; default 1920
 height = 1080                      # optional; default 1080
 timeout = 10                       # optional; seconds
+key_interval = 0.05                # optional; seconds between key reports
 gst_launch = "gst-launch-1.0"      # optional; GStreamer's command
 ```
 
@@ -71,6 +77,13 @@ mouse, so koid keeps what is held down with `keyboard.down` and
 `usb_connected: false` while the target is off or has not found the
 NanoKVM-USB's USB device; keyboard and mouse commands are then accepted
 but go nowhere.
+
+The chip passes each keyboard report to the target as soon as it gets
+it, and a target that is slow to read its keyboard misses keys pressed
+and released too quickly: the Dragon Q8B's UEFI lost most of a run of
+arrow keys sent back to back, and some at 20 ms apart. So koid leaves
+`key_interval` (50 ms) after every report, which makes typing take about
+a tenth of a second a character. Raise it if keys still go missing.
 
 For a snapshot koid captures a few frames and keeps the last, since the
 MS2130's first frames after it is opened can be dark or torn. Starting

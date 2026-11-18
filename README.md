@@ -29,6 +29,9 @@ What has been tested on real hardware so far:
   test patterns at 640x480 and 800x600. These switches handle no
   widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
   for the resolutions that work.
+- **nanokvm-usb:** snapshots and the keyboard, on a NanoKVM-USB in
+  front of a Radxa Dragon Q8B in its UEFI menus and shell; not yet the
+  mouse. See [docs/nanokvm-usb.md](docs/nanokvm-usb.md).
 - **pikvm:** every command, on a PiKVM V4 Mini with kvmd 4.61 and a
   board with a 1920x1080 Linux console. See [docs/pikvm.md](docs/pikvm.md)
   for how a target sees the USB drive.

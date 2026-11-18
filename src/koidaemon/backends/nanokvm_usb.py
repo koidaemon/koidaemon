@@ -20,6 +20,7 @@ Configuration:
     width = 1920                        # optional; capture size
     height = 1080                       # optional
     timeout = 10                        # optional; seconds
+    key_interval = 0.05                 # optional; seconds between key reports
     gst_launch = "gst-launch-1.0"       # optional; GStreamer's command
 """
 
@@ -77,6 +78,11 @@ MOUSE_BUTTONS = {"left": 0x01, "right": 0x02, "middle": 0x04}
 # Pause between the clicks of a double click.
 CLICK_INTERVAL = 0.05
 
+# How long each keyboard report stands before the next, by default.  The
+# chip passes reports on as fast as they come, and UEFI on a Radxa Dragon
+# Q8B missed some key presses with less than 50 ms between reports.
+KEY_INTERVAL = 0.05
+
 # The MS2130's first frames after it is opened can be dark or torn, so
 # this many are captured and the last kept.
 SNAPSHOT_FRAMES = 5
@@ -133,10 +139,13 @@ class NanoKVMUSBBackend(Backend):
         self.width = settings.get_int("width", 1920)
         self.height = settings.get_int("height", 1080)
         self.timeout = settings.get_float("timeout", 10.0)
+        self.key_interval = settings.get_float("key_interval", KEY_INTERVAL)
         self.gst_launch = settings.get_str("gst_launch", "gst-launch-1.0")
         settings.finish()
         if self.width < 1 or self.height < 1:
             raise ConfigError("target %r: width and height must be positive" % target)
+        if self.key_interval < 0:
+            raise ConfigError("target %r: key_interval cannot be negative" % target)
 
         self._fd: int | None = None
         self._buffer = b""
@@ -337,6 +346,7 @@ class NanoKVMUSBBackend(Backend):
                                  "the modifiers" % MAX_KEYS)
         report = bytes([modifiers, 0] + pressed + [0] * (MAX_KEYS - len(pressed)))
         self._checked(CMD_KEYBOARD, report)
+        time.sleep(self.key_interval)
 
     def _send_held_keys(self) -> None:
         self._send_keys(self._modifiers, self._keys)

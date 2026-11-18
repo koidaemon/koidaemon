@@ -43,7 +43,7 @@ def chip():
 
 @pytest.fixture
 def backend(tmp_path, chip):
-    backend = make_backend(tmp_path, chip.path, timeout=1)
+    backend = make_backend(tmp_path, chip.path, timeout=1, key_interval=0)
     yield backend
     backend.close()
 
@@ -92,6 +92,24 @@ def test_settings(tmp_path):
     assert (backend.width, backend.height) == (1280, 720)
     assert backend.describe()["serial"] == "/dev/ttyACM2"
     assert "storage.stick" not in backend.describe()["capabilities"]
+
+
+def test_key_interval(tmp_path):
+    assert make_backend(tmp_path, "/dev/ttyACM2").key_interval == nanokvm_usb.KEY_INTERVAL
+    assert make_backend(tmp_path, "/dev/ttyACM2", key_interval=0.2).key_interval == 0.2
+    with pytest.raises(ConfigError, match="cannot be negative"):
+        make_backend(tmp_path, "/dev/ttyACM2", key_interval=-1)
+
+
+def test_keys_are_spaced_out(tmp_path, chip, monkeypatch):
+    pauses = []
+    monkeypatch.setattr(nanokvm_usb.time, "sleep", pauses.append)
+    backend = make_backend(tmp_path, chip.path, timeout=1, key_interval=0.07)
+    try:
+        backend.press([[A]])
+    finally:
+        backend.close()
+    assert pauses == [0.07, 0.07]
 
 
 def test_bad_size(tmp_path):
