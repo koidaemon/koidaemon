@@ -15,6 +15,7 @@ from koidaemon.errors import ConfigError
 
 # Backend name -> "module:class".
 BACKENDS = {
+    "linkr": "koidaemon.backends.linkr:LinkrBackend",
     "nanokvm-usb": "koidaemon.backends.nanokvm_usb:NanoKVMUSBBackend",
     "pikvm": "koidaemon.backends.pikvm:PiKVMBackend",
     "raritan-legacy": "koidaemon.backends.raritan_legacy:RaritanLegacyBackend",

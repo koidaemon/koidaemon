@@ -18,6 +18,7 @@ or a serial line, are meant to be supported too.
 
 | Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
+| [`linkr`](docs/linkr.md) | Radxa Linkr, through its public API | yes | yes | JPEG | no | no |
 | [`nanokvm-usb`](docs/nanokvm-usb.md) | Sipeed NanoKVM-USB, plugged into koid's machine | yes | yes | JPEG | no | no |
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |

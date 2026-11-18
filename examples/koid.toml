@@ -25,3 +25,10 @@ ca_file = "pikvm-b.pem"
 backend = "nanokvm-usb"
 serial = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXXXX-if00"
 video = "/dev/v4l/by-id/usb-MACROSILICON_USB3_Video_XXXXXXXX-video-index0"
+
+# A board behind a Radxa Linkr.
+[targets.board-d]
+backend = "linkr"
+url = "https://192.0.2.30"
+token_file = "/run/secrets/linkr"
+ca_file = "linkr.pem"
