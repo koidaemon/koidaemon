@@ -22,7 +22,8 @@ or a serial line, are meant to be supported too.
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
 
-What has been tested on real hardware so far:
+What has been tested on real hardware so far ([TESTING.md](TESTING.md)
+lists what has not):
 
 - **raritan-legacy:** keyboard and mouse, on a Dominion KX with firmware
   1.4.9.5.16 and a DCIM-USBG2; snapshots of a Linux text console and of
