@@ -87,6 +87,10 @@ def test_password_from_a_file(tmp_path):
     assert settings({"password_file": "secret"}, tmp_path).get_password() == "hunter2"
 
 
+def test_optional_password():
+    assert settings({}).get_password("token_file", None) is None
+
+
 def test_leftover_settings_are_reported():
     with pytest.raises(ConfigError, match="unknown settings extra, more"):
         settings({"extra": 1, "more": 2}).finish()

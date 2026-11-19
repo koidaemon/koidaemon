@@ -86,13 +86,15 @@ class Settings:
             return None
         return self._config_dir / pathlib.Path(value).expanduser()
 
-    def get_password(self, key: str = "password_file") -> str:
+    def get_password(self, key: str = "password_file", default=...) -> str | None:
         """Read a password from the file named by key.
 
         Passwords never go in the configuration file itself, which is
         typically readable by more people than the secret should be.
         """
-        path = self.get_path(key)
+        path = self.get_path(key, default)
+        if path is None:
+            return None
         try:
             return path.read_text().strip()
         except OSError as error:
