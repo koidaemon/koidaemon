@@ -62,7 +62,9 @@ page uploads, mounts, unmounts and deletes `.iso` and `.img` images, and
 the target sees a mounted image as a USB drive. This is how that page
 does it, read from the JavaScript a Linkr running firmware 1.6.0 serves
 (none of it is documented by Radxa, and it may change between firmware
-versions):
+versions). Login, listing, space, upload, mount, unmount and delete were
+then tried on that Linkr with a 4 MiB image, and the answers below are
+what it sent:
 
 **Login.** The private API does not take the access token. It takes a
 login with the Linkr's own user and password, as Radxa's harness-linkr
@@ -80,18 +82,27 @@ client also does:
 
 | Request | Does |
 |---|---|
-| `GET /api/storage/list` | the images: `data.list`, and `data.mounted`, the one presented |
-| `GET /api/storage/space` | free, used and total space on the Linkr |
+| `GET /api/storage/list` | `{"list": [{"name", "md5", "size", "mod_time"}], "mounted": NAME or ""}` |
+| `GET /api/storage/space` | `{"total", "used", "free"}` in bytes (13.5 GB on a 1.6.0 Linkr) |
+| `GET /api/virtual/device` | `{"ncm", "uac", "ums"}`: which USB gadget functions are on |
 | `POST /api/storage/mount` `{"filename": NAME}` | presents an image to the target |
 | `POST /api/storage/unmount` | disconnects it (the page does this before every mount) |
 | `DELETE /api/storage/file` `{"filename": NAME, "md5": MD5}` | deletes an image |
 
 Mounting takes only a file name: the page offers no choice of CD or
-stick, and no read-only setting.
+stick, and no read-only setting. Each of these answers `{"code": 0,
+"data": {}}` on success. The list's `md5` is empty even for an image
+uploaded with one, so it cannot say whether an image is already there.
+
+With nothing on the Linkr's USB side, `mounted` named the image but
+`ums` stayed false; whether `ums` turns on once a target is connected has
+not been seen yet.
 
 **Uploading** goes over the WebSocket at `/ws`, as protobuf `WsMessage`
 messages. Each carries the JWT in its `Token` field (2), a
 `MessageType` (field 1) and one request:
+
+Every answer has `Message` (field 4) `success` when it worked.
 
 1. `UploadFileStart` (type 8, request in field 20): upload type
    `VirtualDisk` (0), file name, the file's MD5 as hex, its size, and the
@@ -107,6 +118,12 @@ messages. Each carries the JWT in its `Token` field (2), a
 An answer with `MessageCode` 1 and `Message` `no_space` means the Linkr
 is full; `MessageCode` 403 means the token has expired.
 
+A 4 MiB upload, two chunks, went through without koid sending the web
+page's periodic ping messages.
+
 To support it koid would need the Linkr's password as well as the
 access token, a small protobuf encoder (the messages use only varints,
 strings and bytes), and binary messages over its own WebSocket client.
+That client masks frames one byte at a time in Python, which is fine
+for keyboard events but too slow for gigabytes of ISO; it would need a
+faster way to mask.

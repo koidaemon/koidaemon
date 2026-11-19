@@ -44,8 +44,10 @@ access token (System Settings, Access Token).
 - [ ] `mouse.move` and clicks land where they should
 - [ ] `mouse.scroll`: does a positive `wheelV` scroll down, as Radxa's
       own client says?
-- [ ] USB storage (virtual media): the private API the Linkr's web
-      interface uses is described in docs/linkr.md. With the Linkr's
-      password, check the answers of `/api/storage/list` and `/space`,
-      then upload, mount, unmount and delete a small image, and see how
-      the target sees it (stick only? writable?).
+- [x] USB storage over the private API (docs/linkr.md): login, list,
+      space, upload over `/ws`, mount, unmount and delete, with a 4 MiB
+      image and nothing on the Linkr's USB side
+- [ ] How a target sees a mounted image: stick or CD, writable or not,
+      and whether `ums` in `/api/virtual/device` turns on
+- [ ] Uploading a full-size ISO: speed, and resuming an interrupted
+      upload from `NextChunkIndex`
