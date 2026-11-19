@@ -18,7 +18,7 @@ or a serial line, are meant to be supported too.
 
 | Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
-| [`linkr`](docs/linkr.md) | Radxa Linkr, through its public API | yes | yes | JPEG | no | no |
+| [`linkr`](docs/linkr.md) | Radxa Linkr | yes | yes | JPEG | yes, always writable | no |
 | [`nanokvm-usb`](docs/nanokvm-usb.md) | Sipeed NanoKVM-USB, plugged into koid's machine | yes | yes | JPEG | no | no |
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
@@ -31,6 +31,9 @@ lists what has not):
   test patterns at 640x480 and 800x600. These switches handle no
   widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
   for the resolutions that work.
+- **linkr:** USB storage only, on a Linkr with firmware 1.6.0 over USB-C
+  and a Linux laptop as the target; not yet the keyboard, mouse or
+  snapshots. See [docs/linkr.md](docs/linkr.md).
 - **nanokvm-usb:** snapshots and the keyboard, on a NanoKVM-USB in
   front of a Radxa Dragon Q8B in its UEFI menus and shell; not yet the
   mouse. See [docs/nanokvm-usb.md](docs/nanokvm-usb.md).

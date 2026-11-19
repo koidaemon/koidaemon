@@ -2,13 +2,18 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Backend for the Radxa Linkr, through its public API.
+"""Backend for the Radxa Linkr.
 
-The public API (https://docs.radxa.com/en/linkr/linkr/develop-guide) has
-two requests, authenticated with an access token in an "Authorization:
-token ..." header: GET /api/public/snapshot for a JPEG of the screen, and
-POST /api/public/control with a list of keyboard, mouse and text events.
-It has nothing for the Linkr's virtual media.
+The keyboard, mouse and screen go through the Linkr's public API
+(https://docs.radxa.com/en/linkr/linkr/develop-guide): two requests,
+authenticated with an access token in an "Authorization: token ..."
+header, GET /api/public/snapshot for a JPEG of the screen and POST
+/api/public/control with a list of keyboard, mouse and text events.
+
+The public API has nothing for the Linkr's virtual media, so disk images
+go through the API its web interface uses (koidaemon.backends.
+linkr_storage), which needs the Linkr's own user and password.  Without
+password_file there is no USB storage.
 
 Configuration:
 
@@ -16,6 +21,8 @@ Configuration:
     backend = "linkr"
     url = "https://linkr.lab"
     token_file = "/run/secrets/linkr"   # an access token, radxa_linkr_...
+    user = "admin"                      # optional; for USB storage
+    password_file = "/run/secrets/linkr-password"   # optional; ditto
     ca_file = "linkr.pem"               # optional; trust this certificate
     verify_tls = true                   # optional; false skips the check
     timeout = 30                        # optional; seconds per request
@@ -30,8 +37,10 @@ import urllib.request
 
 from koidaemon import commands, keys, tls
 from koidaemon.backends.base import Backend, Settings, Snapshot
+from koidaemon.backends.linkr_storage import LinkrStorage, image_name
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
 from koidaemon.images import jpeg_size
+from koidaemon.uploads import DiskImage
 
 # The Linkr types text given as these characters only.
 TEXT_CHARACTERS = frozenset("\t\n" + "".join(chr(code) for code in range(32, 127)))
@@ -81,10 +90,22 @@ class LinkrBackend(Backend):
             raise ConfigError("target %r: url must start with https:// or http://" % target)
         self.token = settings.get_password("token_file")
         self.timeout = settings.get_float("timeout", 30.0)
+        user = settings.get_str("user", "admin")
+        password_file = settings.get_path("password_file", None)
         ca_file = settings.get_path("ca_file", None)
         verify_tls = settings.get_bool("verify_tls", True)
         settings.finish()
         self._tls = tls.client_context(ca_file, verify_tls)
+        # Disk images need the Linkr's own login, so only with a password.
+        self.storage: LinkrStorage | None = None
+        if password_file is not None:
+            try:
+                password = password_file.read_text().strip()
+            except OSError as error:
+                raise ConfigError("%s: cannot read %s: %s"
+                                  % (settings.where, password_file, error.strerror)) from error
+            self.storage = LinkrStorage(self.url, user, password, self._tls, self.timeout)
+            self.capabilities = self.capabilities | {commands.STORAGE_STICK}
         # The last screen size seen in a snapshot, to place the pointer.
         self._screen: tuple[int, int] | None = None
         # Every mouse event says the buttons held and where the pointer is.
@@ -236,6 +257,67 @@ class LinkrBackend(Backend):
             events.append(self._mouse_event(-step))
             remaining -= step
         self._control(events)
+
+
+    # ------------------------------------------------------------------
+    # USB storage
+    # ------------------------------------------------------------------
+
+    def _storage(self) -> LinkrStorage:
+        if self.storage is None:
+            raise Unsupported("USB storage on a Linkr needs its password_file")
+        return self.storage
+
+    def storage_insert(self, image: DiskImage, mode: str, writable: bool) -> dict:
+        storage = self._storage()
+        if mode != "stick":
+            raise Unsupported("a Linkr presents images only as a USB stick")
+        if not writable:
+            raise InvalidRequest("a Linkr cannot present an image read-only: the target "
+                                 "can always write to it; insert it as writable "
+                                 "(koictl storage insert --writable)")
+
+        name = image_name(image.name, image.digest())
+        stored, mounted = storage.images()
+        sizes = {entry.get("name"): entry.get("size") for entry in stored}
+        if sizes.get(name) != image.size:
+            # The name carries the image's SHA-256, so a different size
+            # is an upload that stopped part way; the Linkr says where to
+            # carry on from.
+            free = storage.free_space() + (sizes.get(name) or 0)
+            if image.size > free:
+                raise BackendError("the Linkr has %d bytes free, not enough for %s (%d bytes)"
+                                   % (free, image.name, image.size))
+            storage.upload(image, name)
+            stored, mounted = storage.images()
+            if not any(entry.get("name") == name and entry.get("size") == image.size
+                       for entry in stored):
+                raise BackendError("the Linkr did not list %s after it was uploaded" % name)
+
+        if mounted != name:
+            if mounted:
+                storage.unmount()
+            storage.mount(name)
+        status = self.storage_status()
+        if status["image"] != name:
+            raise BackendError("the Linkr did not mount %s" % name)
+        return status
+
+    def storage_eject(self) -> None:
+        storage = self._storage()
+        _stored, mounted = storage.images()
+        if mounted:
+            storage.unmount()
+
+    def storage_status(self) -> dict:
+        _stored, mounted = self._storage().images()
+        return {
+            "inserted": bool(mounted),
+            "image": mounted or None,
+            # The Linkr has no other way to present an image.
+            "mode": "stick",
+            "writable": True,
+        }
 
 
 def _web_code(usage: int) -> str:

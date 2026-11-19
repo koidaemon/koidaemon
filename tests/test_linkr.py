@@ -203,3 +203,199 @@ def test_scroll(device, backend):
         ["mouse_abs", 0, 0.0, 0.0, 20, 0], ["mouse_abs", 0, 0.0, 0.0, 20, 0],
         ["mouse_abs", 0, 0.0, 0.0, 5, 0],
     ], [["mouse_abs", 0, 0.0, 0.0, -3, 0]]]
+
+
+# ----------------------------------------------------------------------
+# USB storage
+# ----------------------------------------------------------------------
+
+import hashlib
+import io
+
+from koidaemon import commands
+from koidaemon.backends import linkr_storage
+from koidaemon.errors import Unsupported
+from koidaemon.uploads import LocalImage, PushedImage
+
+
+def test_protobuf_round_trip():
+    message = linkr_storage.encode([(1, 8), (2, "jwt"), (3, 0), (20, linkr_storage.encode(
+        [(4, 300), (5, b"\x00\xff")]))])
+    fields = linkr_storage.decode(message)
+    assert fields[1] == 8 and fields[2] == b"jwt" and 3 not in fields
+    assert linkr_storage.decode(fields[20]) == {4: 300, 5: b"\x00\xff"}
+
+
+def test_protobuf_cut_short():
+    with pytest.raises(ValueError):
+        linkr_storage.decode(linkr_storage.encode([(2, "hello")])[:-1])
+
+
+def test_password_hash():
+    # As Radxa's harness-linkr hashes it.
+    assert linkr_storage.hash_password("pw") == hashlib.sha256(
+        b"RADXA_FIXED_SALT_v1pw").hexdigest()
+
+
+@pytest.fixture
+def storage_backend(tmp_path, device):
+    (tmp_path / "password").write_text(device.password + "\n")
+    return make_backend(tmp_path, device.url, password_file="password")
+
+
+def local_image(tmp_path, size, name="disk.img") -> LocalImage:
+    path = tmp_path / name
+    path.write_bytes(bytes(index % 251 for index in range(size)))
+    return LocalImage(path)
+
+
+def stored_name(image) -> str:
+    return linkr_storage.image_name(image.name, image.digest())
+
+
+@pytest.fixture
+def small_chunks(monkeypatch):
+    monkeypatch.setattr(linkr_storage, "CHUNK_SIZE", 1000)
+
+
+def test_no_storage_without_a_password(backend):
+    assert commands.STORAGE_STICK not in backend.capabilities
+    with pytest.raises(Unsupported, match="password_file"):
+        backend.storage_status()
+
+
+def test_storage_capability(storage_backend):
+    assert storage_backend.capabilities >= {commands.STORAGE_STICK}
+    assert commands.STORAGE_CDROM not in storage_backend.capabilities
+
+
+def test_unreadable_password_file(tmp_path, device):
+    with pytest.raises(ConfigError, match="cannot read"):
+        make_backend(tmp_path, device.url, password_file="missing")
+
+
+def test_wrong_password(tmp_path, device):
+    (tmp_path / "password").write_text("wrong\n")
+    backend = make_backend(tmp_path, device.url, password_file="password")
+    with pytest.raises(BackendError, match="wrong user or password"):
+        backend.storage_status()
+
+
+def test_insert_uploads_and_mounts(tmp_path, device, storage_backend, small_chunks):
+    image = local_image(tmp_path, 2500)
+    status = storage_backend.storage_insert(image, "stick", True)
+    name = stored_name(image)
+    assert status == {"inserted": True, "image": name, "mode": "stick", "writable": True}
+    assert device.images[name] == image.path.read_bytes()
+    assert device.mounted == name
+    chunks = [m["request"][4] if 4 in m["request"] else 0
+              for m in device.ws_messages if m["type"] == linkr_storage.UPLOAD_CHUNK]
+    assert chunks == [0, 1, 2]
+    start = device.ws_messages[0]["request"]
+    assert start[3].decode() == hashlib.md5(image.path.read_bytes()).hexdigest()
+    assert start[4] == 2500 and start[5] == 3
+    assert name.startswith("koid-" + image.digest()[:12])
+
+
+def test_insert_an_image_already_there(tmp_path, device, storage_backend):
+    image = local_image(tmp_path, 100)
+    storage_backend.storage_insert(image, "stick", True)
+    storage_backend.storage_eject()
+    device.ws_messages.clear()
+    storage_backend.storage_insert(image, "stick", True)
+    assert device.ws_messages == []
+    assert device.mounted == stored_name(image)
+
+
+def test_insert_unmounts_another_image_first(tmp_path, device, storage_backend):
+    device.images["other.iso"] = b"x"
+    device.mounted = "other.iso"
+    image = local_image(tmp_path, 100)
+    storage_backend.storage_insert(image, "stick", True)
+    calls = [(method, path) for method, path, _ in device.storage_calls]
+    assert ("POST", "/api/storage/unmount") in calls
+    assert calls.index(("POST", "/api/storage/unmount")) < calls.index(
+        ("POST", "/api/storage/mount"))
+    assert device.mounted == stored_name(image)
+
+
+def test_insert_the_mounted_image_again(tmp_path, device, storage_backend):
+    image = local_image(tmp_path, 100)
+    storage_backend.storage_insert(image, "stick", True)
+    device.storage_calls.clear()
+    storage_backend.storage_insert(image, "stick", True)
+    # Re-plugging the Linkr's USB gadget for nothing would drop the keyboard.
+    assert not [call for call in device.storage_calls if call[0] == "POST"]
+
+
+def test_insert_read_only_is_refused(tmp_path, device, storage_backend):
+    with pytest.raises(InvalidRequest, match="--writable"):
+        storage_backend.storage_insert(local_image(tmp_path, 100), "stick", False)
+    assert device.images == {}
+
+
+def test_insert_as_a_cd_is_refused(tmp_path, storage_backend):
+    with pytest.raises(Unsupported, match="USB stick"):
+        storage_backend.storage_insert(local_image(tmp_path, 100), "cdrom", False)
+
+
+def test_insert_a_pushed_image(tmp_path, device, storage_backend, small_chunks):
+    data = bytes(range(256)) * 9
+    digest = hashlib.sha256(data).hexdigest()
+    image = PushedImage("pushed.img", len(data), digest, lambda size: io.BytesIO(data))
+    storage_backend.storage_insert(image, "stick", True)
+    assert device.images[linkr_storage.image_name("pushed.img", digest)] == data
+
+
+def test_insert_a_pushed_image_that_is_not_what_it_said(tmp_path, device, storage_backend):
+    data = b"a" * 100
+    image = PushedImage("pushed.img", len(data), "0" * 64, lambda size: io.BytesIO(data))
+    with pytest.raises(Exception, match="SHA-256"):
+        storage_backend.storage_insert(image, "stick", True)
+    assert device.images == {} and device.ws_messages == []
+
+
+def test_upload_carries_on_after_the_token_expires(tmp_path, device, storage_backend,
+                                                   small_chunks):
+    device.expire_after_chunks = 2
+    image = local_image(tmp_path, 4500)
+    storage_backend.storage_insert(image, "stick", True)
+    assert device.images[stored_name(image)] == image.path.read_bytes()
+    chunks = [m["request"].get(4, 0) for m in device.ws_messages
+              if m["type"] == linkr_storage.UPLOAD_CHUNK]
+    # Two chunks, a refused third, then the rest after logging in again.
+    assert chunks == [0, 1, 2, 2, 3, 4]
+    assert device.logins == 2
+
+
+def test_upload_with_no_space(tmp_path, device, storage_backend):
+    device.no_space = True
+    with pytest.raises(BackendError, match="no space"):
+        storage_backend.storage_insert(local_image(tmp_path, 100), "stick", True)
+
+
+def test_image_bigger_than_the_free_space(tmp_path, device, storage_backend):
+    device.space = 50
+    with pytest.raises(BackendError, match="50 bytes free"):
+        storage_backend.storage_insert(local_image(tmp_path, 100), "stick", True)
+    assert device.ws_messages == []
+
+
+def test_login_again_when_the_token_expires(device, storage_backend):
+    storage_backend.storage_status()
+    device.expire_tokens()
+    assert storage_backend.storage_status()["inserted"] is False
+    assert device.logins == 2
+
+
+def test_eject(tmp_path, device, storage_backend):
+    storage_backend.storage_insert(local_image(tmp_path, 100), "stick", True)
+    storage_backend.storage_eject()
+    assert device.mounted == ""
+    assert storage_backend.storage_status() == {"inserted": False, "image": None,
+                                                "mode": "stick", "writable": True}
+
+
+def test_eject_with_nothing_mounted(device, storage_backend):
+    storage_backend.storage_eject()
+    assert ("POST", "/api/storage/unmount", None) not in device.storage_calls

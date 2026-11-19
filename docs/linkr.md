@@ -1,7 +1,12 @@
 # linkr
 
-For the [Radxa Linkr](https://docs.radxa.com/en/linkr/linkr), through its
-public API. Not yet tried on a real Linkr: what follows is from Radxa's
+For the [Radxa Linkr](https://docs.radxa.com/en/linkr/linkr). The
+keyboard, mouse and screen go through its public API, and disk images
+through the API its own web interface uses.
+
+USB storage has been tried with a Linkr running firmware 1.6.0, reached
+over USB-C, with a Linux laptop as the target. The keyboard, mouse and
+snapshots have not been tried on a real Linkr yet: they follow Radxa's
 [developer documentation](https://docs.radxa.com/en/linkr/linkr/develop-guide).
 
 | | |
@@ -9,7 +14,7 @@ public API. Not yet tried on a real Linkr: what follows is from Radxa's
 | Keyboard | yes; text only as ASCII, tab and newline |
 | Mouse | yes, absolute pixels |
 | Snapshot | yes; the Linkr sends JPEG, which koid turns into PNG unless asked not to |
-| USB storage | no; the public API cannot reach the Linkr's virtual media |
+| USB storage | yes, as a USB stick the target can write to, with the Linkr's password |
 
 ## Configuration
 
@@ -18,6 +23,8 @@ public API. Not yet tried on a real Linkr: what follows is from Radxa's
 backend = "linkr"
 url = "https://192.0.2.30"
 token_file = "/run/secrets/linkr"    # an access token
+user = "admin"                       # optional; for USB storage
+password_file = "/run/secrets/linkr-password"   # optional; ditto
 ca_file = "linkr.pem"                # optional; trust this certificate
 verify_tls = true                    # optional; default true
 timeout = 30                         # optional; seconds per request
@@ -27,6 +34,10 @@ The API takes an access token rather than the Linkr's password. Make one
 in the Linkr's web interface, under System Settings, Access Token,
 Generate; it starts with `radxa_linkr_` and is shown only once. Put it in
 `token_file`. Deleting it in the same place stops koid at once.
+
+USB storage needs more than the access token: the Linkr's own user and
+password, the ones you log in to its web interface with. Without
+`password_file` the target has no USB storage.
 
 As with a PiKVM, a Linkr's own certificate is best given to koid as
 `ca_file`, which koid then trusts whatever name the Linkr is reached by.
@@ -54,17 +65,43 @@ has none. `status` reports that size, and no video until koid has taken a
 snapshot. Each mouse event says which buttons are held and where the
 pointer is, so koid keeps both.
 
-## USB storage: how it could work
+## USB storage
 
-koid cannot present disk images on a Linkr yet. The public API has no
-virtual media, but the Linkr's own web interface does: its Virtual Disk
-page uploads, mounts, unmounts and deletes `.iso` and `.img` images, and
-the target sees a mounted image as a USB drive. This is how that page
-does it, read from the JavaScript a Linkr running firmware 1.6.0 serves
-(none of it is documented by Radxa, and it may change between firmware
-versions). Login, listing, space, upload, mount, unmount and delete were
-then tried on that Linkr with a 4 MiB image, and the answers below are
-what it sent:
+`storage.insert` uploads the image to the Linkr, then presents it:
+
+1. logs in with `user` and `password_file`;
+2. uploads the image, named `koid-<first 12 hex digits of its SHA-256>-<file name>`,
+   unless an image of that name and size is already there;
+3. unmounts whatever else is mounted, and mounts it.
+
+The Linkr can only present an image as a USB stick, and the target can
+always write to it, so koid refuses `--cdrom`, and refuses an insert
+without `--writable` rather than present a read-only image the target
+could write to. Writes reach the image stored on the Linkr and stay
+there, so inserting the same image again gives the target what it wrote
+last time; to start from a clean copy, delete the image in the Linkr's
+web interface first.
+
+The Linkr wants an image's MD5 before any of it is sent, so koid reads a
+file twice, once for the MD5 and once to send it. An image a client
+pushes (`koictl storage insert --push-file`) is kept in a temporary file
+on the machine running koid while it is sent, so that needs room for it.
+
+Uploaded images stay on the Linkr, and koid does not delete old ones;
+remove them in the Linkr's web interface when it fills up.
+
+Mounting and unmounting re-plug the Linkr's whole USB device, keyboard
+and mouse included, so the target sees them disconnect for a couple of
+seconds, and anything held with `keyboard.down` or `mouse.down` is let
+go. koid does not mount again an image that is already mounted.
+
+## The Linkr's private API
+
+The public API has no virtual media, but the Linkr's own web interface
+does: its Virtual Disk page uploads, mounts, unmounts and deletes `.iso`
+and `.img` images. koid does what that page does, read from the
+JavaScript a Linkr running firmware 1.6.0 serves. None of it is
+documented by Radxa, and it may change between firmware versions.
 
 **Login.** The private API does not take the access token. It takes a
 login with the Linkr's own user and password, as Radxa's harness-linkr
@@ -106,9 +143,10 @@ uploaded with one, so it cannot say whether an image is already there.
 - Mounting and unmounting re-plug the whole gadget, keyboard and mouse
   included: the target sees the Linkr disconnect and come back about two
   seconds later, so anything held down is released.
-- The first mount after the Linkr started showed up on the target in two
-  seconds; a mount sent straight after an unmount took about 90. koid
-  should wait for the disk rather than assume it is there.
+- A mount usually reached the target within a few seconds, and the
+  mount request itself took about four. Once, a mount sent less than a
+  second after an unmount took about 90 seconds to show up on the
+  target.
 - `ums` in `/api/virtual/device` stayed false throughout, image mounted
   or not, so it says nothing about the virtual disk.
 - The Linkr's clock went back to 2021 when it restarted, so `mod_time`
@@ -136,10 +174,3 @@ is full; `MessageCode` 403 means the token has expired.
 
 A 4 MiB upload, two chunks, went through without koid sending the web
 page's periodic ping messages.
-
-To support it koid would need the Linkr's password as well as the
-access token, a small protobuf encoder (the messages use only varints,
-strings and bytes), and binary messages over its own WebSocket client.
-That client masks frames one byte at a time in Python, which is fine
-for keyboard events but too slow for gigabytes of ISO; it would need a
-faster way to mask.

@@ -49,7 +49,11 @@ access token (System Settings, Access Token).
       image and nothing on the Linkr's USB side
 - [x] How a target sees a mounted image: a writable removable disk,
       never a CD (see docs/linkr.md)
-- [ ] Why a mount sent straight after an unmount took about 90 seconds
-      to reach the target, and how long koid should wait
+- [x] `storage.insert`, `.eject` and `.status` through koid, with a 4 MiB
+      image: uploaded, seen by the target with the right MD5, ejected,
+      and inserted again without uploading
+- [ ] Why one mount sent straight after an unmount took about 90 seconds
+      to reach the target (not seen through koid)
+- [ ] What a wrong password gets from a real Linkr
 - [ ] Uploading a full-size ISO: speed, and resuming an interrupted
       upload from `NextChunkIndex`
