@@ -18,7 +18,7 @@ or a serial line, are meant to be supported too.
 
 | Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
-| [`jetkvm`](docs/jetkvm.md) | JetKVM | yes | yes | PNG (koid decodes H.264) | no | no |
+| [`jetkvm`](docs/jetkvm.md) | JetKVM | yes | yes | PNG (koid decodes H.264) | yes, read-only | yes |
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
 
@@ -29,9 +29,10 @@ What has been tested on real hardware so far:
   test patterns at 640x480 and 800x600. These switches handle no
   widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
   for the resolutions that work.
-- **jetkvm:** `status` and `snapshot`, on a JetKVM with firmware 0.5.10
-  and a board with a 1920x1080 Linux console; the other commands
-  against a fake JetKVM. See [docs/jetkvm.md](docs/jetkvm.md).
+- **jetkvm:** `status`, `snapshot` and `storage.status`, on a JetKVM
+  with firmware 0.5.10 and a board with a 1920x1080 Linux console; the
+  other commands against a fake JetKVM. See
+  [docs/jetkvm.md](docs/jetkvm.md).
 - **pikvm:** every command, on a PiKVM V4 Mini with kvmd 4.61 and a
   board with a 1920x1080 Linux console. See [docs/pikvm.md](docs/pikvm.md)
   for how a target sees the USB drive.

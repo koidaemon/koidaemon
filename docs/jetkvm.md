@@ -1,13 +1,13 @@
 # jetkvm
 
-For [JetKVM](https://jetkvm.com). koid talks to the JetKVM itself, over WebRTC, as the JetKVM's web interface does. Tested with firmware 0.5.10 on a board with a 1920x1080 Linux console: `status` and `snapshot`. Keyboard and mouse commands are tested against a fake JetKVM that follows the 0.5.10 firmware source.
+For [JetKVM](https://jetkvm.com). koid talks to the JetKVM itself, over WebRTC, as the JetKVM's web interface does. Tested with firmware 0.5.10 on a board with a 1920x1080 Linux console: `status`, `snapshot` and `storage.status`. Keyboard, mouse and storage commands are tested against a fake JetKVM that follows the 0.5.10 firmware source.
 
 | | |
 |---|---|
 | Keyboard | yes |
 | Mouse | yes, absolute pixels |
 | Snapshot | yes; the JetKVM sends H.264 video, which koid decodes and hands out as PNG |
-| USB storage | not yet |
+| USB storage | yes, as a stick or a CD drive, read-only |
 
 ## Install
 
@@ -54,9 +54,24 @@ The session carries two data channels (and video, for a snapshot): `rpc`, with J
 | `snapshot` | the next decoded frame of the video |
 | `keyboard.*` | keyboard macros on `hidrpc` |
 | `mouse.*` | absolute pointer reports on `hidrpc`; the wheel is `wheelReport` on `rpc`, as firmware 0.5.10 has no wheel message on `hidrpc` |
+| `storage.*` | `listStorageFiles`, `startStorageFileUpload` and an HTTP POST to `/storage/upload`, `mountWithStorage`, `unmountImage`, `getVirtualMediaState` |
 
 The JetKVM runs a keyboard macro itself, step by step, and says when it has finished. So koid sends `keyboard.type` as one macro (or one per 512 characters) instead of a request per key, and the command returns once the text is typed. Each key is held for 20 ms and released for 20 ms, as when the web interface pastes text: 40 ms a character, whatever the network. `keyboard.type` types the text as given: keys held with `keyboard.down` are let go while it types and pressed again after. Macros send whole keyboard reports, which the JetKVM does not release on its own, so `keyboard.down` holds a key until `keyboard.up`.
 
 Mouse positions are scaled to 0..32767 using the video size. Every pointer report says where the pointer is, so a click without a position clicks where koid last put the pointer, or the top-left corner before koid has moved it. The JetKVM does not answer pointer reports: mouse commands return once koid has sent them.
 
 With no signal from the target, `snapshot` fails with "no video signal from the target (no_signal)", and so do mouse commands with a position until koid has seen the screen's size.
+
+## USB storage
+
+`storage.insert` uploads the image to the JetKVM's storage, then presents it:
+
+1. lists the JetKVM's images, and uploads this one if it is not there, named `koid-<first 12 hex digits of its SHA-256>-<file name>`. The upload streams the file, or a pushed image (`koictl storage insert --push-file`) straight from the client, over HTTP. If a pushed image does not match its SHA-256, or the upload stops, koid deletes what was uploaded;
+2. ejects whatever is presented, since the JetKVM will not mount over it;
+3. mounts the image as a stick or CD, and checks that the JetKVM did.
+
+The JetKVM presents images read-only, so a writable stick is refused. A CD image must be at least 600 KiB, as Linux's USB gadget refuses anything smaller.
+
+Changing between stick and CD makes the JetKVM rebind its USB device, so the target sees the keyboard and mouse unplugged and plugged in again too.
+
+Uploaded images stay on the JetKVM, so inserting the same image again is quick. koid does not delete old ones; remove them in the JetKVM's web interface when its storage fills up.

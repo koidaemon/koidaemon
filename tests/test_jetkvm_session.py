@@ -4,6 +4,7 @@
 
 """The jetkvm backend against a fake JetKVM, over real WebRTC."""
 
+import hashlib
 import io
 import time
 
@@ -18,7 +19,8 @@ from PIL import Image
 from koidaemon import keys
 from koidaemon.backends import jetkvm
 from koidaemon.backends.base import Settings
-from koidaemon.errors import BackendError, InvalidRequest
+from koidaemon.errors import BackendError, InvalidRequest, Unsupported
+from koidaemon.uploads import MIN_CD_SIZE, LocalImage, PushedImage, UploadError, image_name
 
 from fake_jetkvm import FakeJetKVM
 
@@ -325,3 +327,108 @@ def test_a_failed_close_is_not_held_against_later_commands(tmp_path, fake, monke
         assert backend._closing is None
     finally:
         backend.close()
+
+
+# ----------------------------------------------------------------------
+# USB storage
+# ----------------------------------------------------------------------
+
+@pytest.fixture
+def image(tmp_path):
+    path = tmp_path / "installer.iso"
+    # Bigger than a socket buffer.
+    path.write_bytes(bytes(range(256)) * (3 * 1024 * 1024 // 256))
+    return path
+
+
+def stored_name(path) -> str:
+    return image_name(path.name, hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def test_insert(fake, backend, image):
+    status = backend.storage_insert(LocalImage(image), "cdrom", False)
+    name = stored_name(image)
+    assert status == {"inserted": True, "image": name, "mode": "cdrom", "writable": False}
+    assert bytes(fake.files[name]) == image.read_bytes()
+    assert fake.mounted["mode"] == "CDROM"
+    assert backend.storage_status() == status
+
+
+def test_insert_what_is_already_there(fake, backend, image):
+    fake.files[stored_name(image)] = bytearray(image.read_bytes())
+    backend.storage_insert(LocalImage(image), "stick", False)
+    assert "startStorageFileUpload" not in fake.calls
+    assert fake.mounted["mode"] == "Disk"
+
+
+def test_insert_replaces(fake, backend, image):
+    fake.files["other.img"] = bytearray(10)
+    fake.mounted = {"source": "Storage", "mode": "Disk", "filename": "other.img", "size": 10}
+    backend.storage_insert(LocalImage(image), "stick", False)
+    assert fake.mounted["filename"] == stored_name(image)
+
+
+def test_a_stale_partial_upload_is_not_resumed(fake, backend, image):
+    fake.files[stored_name(image) + ".incomplete"] = bytearray(b"other bytes")
+    backend.storage_insert(LocalImage(image), "stick", False)
+    assert bytes(fake.files[stored_name(image)]) == image.read_bytes()
+
+
+def test_insert_a_pushed_image(fake, backend):
+    contents = b"\x55" * 100000
+    digest = hashlib.sha256(contents).hexdigest()
+    image = PushedImage("disk.img", len(contents), digest, lambda size: io.BytesIO(contents))
+    backend.storage_insert(image, "stick", False)
+    assert bytes(fake.files[image_name("disk.img", digest)]) == contents
+
+
+def test_a_pushed_image_that_does_not_match(fake, backend):
+    contents = b"\x55" * 100000
+    digest = hashlib.sha256(b"something else").hexdigest()
+    image = PushedImage("disk.img", len(contents), digest, lambda size: io.BytesIO(contents))
+    with pytest.raises(UploadError, match="SHA-256"):
+        backend.storage_insert(image, "stick", False)
+    assert fake.files == {}
+    assert fake.mounted is None
+
+
+def test_an_upload_the_device_stops(fake, backend, image):
+    fake.stop_upload_after = 100000
+    with pytest.raises(BackendError, match="refused the upload: HTTP 500"):
+        backend.storage_insert(LocalImage(image), "stick", False)
+    assert fake.files == {}
+
+
+def test_too_little_space(fake, backend, image):
+    fake.bytes_free = 1000
+    with pytest.raises(BackendError, match="1000 bytes free"):
+        backend.storage_insert(LocalImage(image), "stick", False)
+    assert "startStorageFileUpload" not in fake.calls
+
+
+def test_writable_is_refused(fake, backend, image):
+    with pytest.raises(Unsupported, match="read-only"):
+        backend.storage_insert(LocalImage(image), "stick", True)
+    assert fake.sessions == 0
+
+
+def test_a_cd_too_small(tmp_path, fake, backend):
+    path = tmp_path / "tiny.iso"
+    path.write_bytes(bytes(MIN_CD_SIZE - 1))
+    with pytest.raises(InvalidRequest, match="too small to be a CD"):
+        backend.storage_insert(LocalImage(path), "cdrom", False)
+
+
+def test_device_errors_carry_the_firmware_message(fake, backend):
+    with pytest.raises(BackendError, match="file does not exist: nothing"):
+        backend._run(lambda session: session.call("deleteStorageFile", filename="nothing"))
+
+
+def test_eject(fake, backend, image):
+    backend.storage_insert(LocalImage(image), "stick", False)
+    backend.storage_eject()
+    assert fake.mounted is None
+    assert backend.storage_status() == {"inserted": False, "image": None, "mode": None,
+                                        "writable": False}
+    backend.storage_eject()
+    assert fake.calls.count("unmountImage") == 1

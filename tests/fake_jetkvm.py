@@ -7,8 +7,8 @@
 Like firmware 0.5.10: the login at /auth/login-local, the signaling
 WebSocket at /webrtc/signaling/client, and a WebRTC peer (aiortc) that
 sends H.264 video of a test picture and answers on the "rpc" (JSON-RPC)
-and "hidrpc" data channels.  It records the keyboard and mouse reports it
-is sent.
+and "hidrpc" data channels and takes uploads at /storage/upload.  It records the
+keyboard and mouse reports it is sent, and keeps storage images in memory.
 """
 
 from __future__ import annotations
@@ -21,6 +21,8 @@ import json
 import struct
 import threading
 import unittest.mock
+import urllib.parse
+import uuid
 
 import aioice.ice
 import av
@@ -71,6 +73,12 @@ class FakeJetKVM:
         self.pointer: list[tuple[int, int, int]] = []
         self.wheel: list[int] = []
         self.macros: list[int] = []
+        self.files: dict[str, bytearray] = {}
+        self.mounted: dict | None = None
+        self.bytes_free = 1 << 30
+        # Uploads fail after this many bytes, as if cut short.
+        self.stop_upload_after: int | None = None
+        self._uploads: dict[str, tuple[str, int]] = {}
         self._peers: list[tuple[RTCPeerConnection, list]] = []
         self._tasks: list[asyncio.Task] = []
         self._loop = asyncio.new_event_loop()
@@ -135,6 +143,8 @@ class FakeJetKVM:
                 pass
 
             def do_POST(self) -> None:
+                if self.path.startswith("/storage/upload?"):
+                    return self._upload()
                 body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
                 if self.path != "/auth/login-local":
                     return self._answer(404, {"error": "not found"})
@@ -160,6 +170,32 @@ class FakeJetKVM:
                 self.end_headers()
                 self.close_connection = True
                 fake._signal(self)
+
+            def _upload(self) -> None:
+                query = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                upload = fake._uploads.pop(query.get("uploadId", [""])[0], None)
+                if fake.password is not None and \
+                        "authToken=%s" % TOKEN not in self.headers.get("Cookie", ""):
+                    self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                    return self._answer(401, {"error": "Unauthorized"})
+                if upload is None:
+                    self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                    return self._answer(404, {"error": "Upload not found"})
+                name, size = upload
+                partial = fake.files[name + ".incomplete"]
+                left = int(self.headers.get("Content-Length", 0))
+                while left:
+                    data = self.rfile.read(min(left, 65536))
+                    if not data:
+                        return
+                    left -= len(data)
+                    if fake.stop_upload_after is None or len(partial) < fake.stop_upload_after:
+                        partial.extend(data)
+                if fake.stop_upload_after is not None and len(partial) >= fake.stop_upload_after:
+                    return self._answer(500, {"error": "Failed to write upload data"})
+                if len(partial) >= size:
+                    fake.files[name] = fake.files.pop(name + ".incomplete")
+                self._answer(200, {"message": "Upload completed"})
 
             def _answer(self, status: int, body: dict, headers: dict | None = None) -> None:
                 data = json.dumps(body).encode()
@@ -274,9 +310,43 @@ class FakeJetKVM:
     def _rpc_getVideoState(self) -> dict:
         return self._video_state()
 
+    def _rpc_listStorageFiles(self) -> dict:
+        return {"files": [{"filename": name, "size": len(data), "createdAt": "2026-11-19T00:00:00Z"}
+                          for name, data in self.files.items()]}
+
+    def _rpc_getStorageSpace(self) -> dict:
+        return {"bytesUsed": sum(map(len, self.files.values())), "bytesFree": self.bytes_free}
+
+    def _rpc_deleteStorageFile(self, filename: str) -> None:
+        if filename not in self.files:
+            raise ValueError("file does not exist: %s" % filename)
+        del self.files[filename]
+
+    def _rpc_startStorageFileUpload(self, filename: str, size: int) -> dict:
+        if filename in self.files:
+            raise ValueError("file already exists: %s" % filename)
+        label = "upload_" + str(uuid.uuid4())
+        partial = self.files.setdefault(filename + ".incomplete", bytearray())
+        self._uploads[label] = (filename, size)
+        return {"alreadyUploadedBytes": len(partial), "dataChannel": label}
+
     def _rpc_wheelReport(self, wheelY: int, wheelX: int) -> None:
         # Firmware 0.5.10 has no wheel message on hidrpc.
         self.wheel.append(wheelY)
+
+    def _rpc_getVirtualMediaState(self) -> dict | None:
+        return self.mounted
+
+    def _rpc_mountWithStorage(self, filename: str, mode: str) -> None:
+        if self.mounted is not None:
+            raise ValueError("another virtual media is already mounted")
+        if filename not in self.files:
+            raise ValueError("failed to get file info: no such file")
+        self.mounted = {"source": "Storage", "mode": mode, "filename": filename,
+                        "size": len(self.files[filename])}
+
+    def _rpc_unmountImage(self) -> None:
+        self.mounted = None
 
     # ------------------------------------------------------------------
     # HID RPC

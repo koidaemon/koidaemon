@@ -47,7 +47,7 @@ def test_settings(tmp_path):
     assert backend.resource == "jetkvm:https://jetkvm.lab"
     assert backend.describe() == {
         "backend": "jetkvm",
-        "capabilities": ["keyboard", "mouse", "snapshot"],
+        "capabilities": ["keyboard", "mouse", "snapshot", "storage.cdrom", "storage.stick"],
         "url": "https://jetkvm.lab",
     }
 

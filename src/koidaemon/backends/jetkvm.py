@@ -46,7 +46,8 @@ import urllib.request
 
 from koidaemon import commands, keys
 from koidaemon.backends.base import Backend, Settings, Snapshot, tls_context
-from koidaemon.errors import BackendError, Busy, ConfigError, InvalidRequest
+from koidaemon.errors import BackendError, Busy, ConfigError, InvalidRequest, Unsupported
+from koidaemon.uploads import MIN_CD_SIZE, DiskImage, image_name
 from koidaemon.websocket import WebSocket, WebSocketError
 
 LOG = logging.getLogger(__name__)
@@ -87,6 +88,9 @@ VIDEO_WAIT = 10.0
 # Decoding video costs a core's quarter at 1080p, so only a session made for
 # a snapshot has any, and it is closed soon after.
 VIDEO_IDLE = 5.0
+PARTIAL = ".incomplete"
+
+MODES = {"stick": "Disk", "cdrom": "CDROM"}
 
 
 def to_mouse_range(position: int, size: int) -> int:
@@ -431,7 +435,7 @@ def _settle(future: asyncio.Future, result=None) -> None:
 
 class JetKVMBackend(Backend):
     name = "jetkvm"
-    capabilities = frozenset({commands.KEYBOARD, commands.MOUSE, commands.SNAPSHOT})
+    capabilities = frozenset(commands.ALL_CAPABILITIES)
 
     def __init__(self, target: str, settings: Settings) -> None:
         super().__init__(target, settings)
@@ -707,3 +711,97 @@ class JetKVMBackend(Backend):
 
     def mouse_scroll(self, notches: int) -> None:
         self._run(self._scroll, notches)
+
+    # ------------------------------------------------------------------
+    # USB storage
+    # ------------------------------------------------------------------
+
+    async def _files(self, session: _Session) -> dict[str, int]:
+        listing = await session.call("listStorageFiles") or {}
+        return {entry["filename"]: entry["size"] for entry in listing.get("files") or []}
+
+    def _send(self, cookie: str | None, upload_id: str, contents, size: int) -> None:
+        """POST the image to the JetKVM, as the web interface does."""
+        headers = {"Content-Type": "application/octet-stream", "Content-Length": str(size)}
+        if cookie:
+            headers["Cookie"] = "authToken=" + cookie
+        request = urllib.request.Request(
+            "%s/storage/upload?uploadId=%s" % (self.url, urllib.parse.quote(upload_id)),
+            data=contents, method="POST", headers=headers)
+        try:
+            urllib.request.urlopen(request, timeout=self.timeout, context=self.tls).close()
+        except urllib.error.HTTPError as error:
+            raise BackendError("%s refused the upload: HTTP %d" % (self.url, error.code)) from error
+        except (urllib.error.URLError, OSError) as error:
+            raise BackendError("the upload to %s failed: %s"
+                               % (self.url, getattr(error, "reason", error))) from error
+
+    async def _upload(self, session: _Session, image: DiskImage, name: str) -> None:
+        LOG.info("%s: uploading %s (%d bytes) as %s", self.target, image.name, image.size, name)
+        # A partial upload could be of other bytes under the same name, from
+        # a pushed image that did not match its SHA-256.
+        if name + PARTIAL in await self._files(session):
+            await session.call("deleteStorageFile", filename=name + PARTIAL)
+        space = await session.call("getStorageSpace") or {}
+        if image.size > space.get("bytesFree", image.size):
+            raise BackendError("%s has %d bytes free, too few for %s"
+                               % (self.url, space["bytesFree"], image.name))
+        contents = await asyncio.to_thread(image.open)
+        try:
+            start = await session.call("startStorageFileUpload", filename=name, size=image.size)
+            await asyncio.to_thread(self._send, session.cookie, start["dataChannel"],
+                                    contents, image.size)
+        except BaseException:
+            try:
+                await session.call("deleteStorageFile", filename=name + PARTIAL)
+            except BackendError:
+                pass
+            raise
+        finally:
+            close = getattr(contents, "close", None)
+            if close is not None:
+                close()
+        if (await self._files(session)).get(name) != image.size:
+            raise BackendError("%s did not keep %s" % (self.url, name))
+
+    async def _state(self, session: _Session) -> dict:
+        state = await session.call("getVirtualMediaState")
+        if not state:
+            return {"inserted": False, "image": None, "mode": None, "writable": False}
+        return {
+            "inserted": True,
+            "image": state.get("filename") or state.get("url"),
+            "mode": "cdrom" if state.get("mode") == "CDROM" else "stick",
+            "writable": False,
+        }
+
+    async def _insert(self, session: _Session, image: DiskImage, name: str, mode: str) -> dict:
+        if name not in await self._files(session):
+            await self._upload(session, image, name)
+        # The JetKVM refuses to mount while anything is mounted.
+        if (await self._state(session))["inserted"]:
+            await session.call("unmountImage")
+        await session.call("mountWithStorage", filename=name, mode=MODES[mode])
+        status = await self._state(session)
+        if status["image"] != name or status["mode"] != mode:
+            raise BackendError("%s did not present %s as a %s" % (self.url, name, mode))
+        return status
+
+    def storage_insert(self, image: DiskImage, mode: str, writable: bool) -> dict:
+        if writable:
+            raise Unsupported("a JetKVM presents images read-only")
+        if mode == "cdrom" and image.size < MIN_CD_SIZE:
+            raise InvalidRequest("%s is too small to be a CD: the JetKVM needs at least %d KiB"
+                                 % (image.name, MIN_CD_SIZE // 1024))
+        name = image_name(image.name, image.digest())
+        return self._run(self._insert, image, name, mode, extra=None)
+
+    async def _eject(self, session: _Session) -> None:
+        if (await self._state(session))["inserted"]:
+            await session.call("unmountImage")
+
+    def storage_eject(self) -> None:
+        self._run(self._eject)
+
+    def storage_status(self) -> dict:
+        return self._run(self._state)
