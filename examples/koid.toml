@@ -13,6 +13,11 @@ port = 1
 password_file = "/run/secrets/raritan"
 wait = 30
 
+# A board behind a JetKVM in noPassword mode.
+[targets.board-c]
+backend = "jetkvm"
+url = "http://192.0.2.30"
+
 # A board behind a PiKVM.
 [targets.board-b]
 backend = "pikvm"

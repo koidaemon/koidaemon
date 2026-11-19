@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
+import contextlib
 import io
 import socket
 import threading
@@ -184,3 +185,65 @@ def test_close_gives_up_on_a_silent_server(monkeypatch):
     start = time.monotonic()
     connection.close()
     assert time.monotonic() - start < 0.9
+
+
+def serve_messages(frames):
+    """A WebSocket server for one client that sends frames, then echoes the
+    client's first message back and closes."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        connection, _ = listener.accept()
+        with connection:
+            stream = connection.makefile("rb")
+            key = None
+            while True:
+                line = stream.readline().decode()
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+                if line in ("\r\n", ""):
+                    break
+            connection.sendall(("HTTP/1.1 101 Switching Protocols\r\n"
+                                "Sec-WebSocket-Accept: %s\r\n\r\n"
+                                % websocket.accept_key(key)).encode())
+            for frame in frames:
+                connection.sendall(frame)
+            opcode = websocket.OPCODE_PONG
+            while opcode == websocket.OPCODE_PONG:
+                opcode, payload = websocket.read_frame(stream)
+            connection.sendall(websocket.encode_frame(opcode, b"echo " + payload))
+            # The client may have gone already.
+            with contextlib.suppress(OSError, websocket.WebSocketError):
+                websocket.read_frame(stream)
+                connection.sendall(websocket.encode_frame(websocket.OPCODE_CLOSE))
+        listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return "ws://127.0.0.1:%d/" % listener.getsockname()[1]
+
+
+def test_messages_are_passed_on_whole():
+    # Go's coder/websocket, which a JetKVM uses, sends each message as a
+    # frame that is not final and an empty final continuation.
+    frames = [
+        b"\x01\x05hello" + b"\x80\x00",
+        websocket.encode_frame(websocket.OPCODE_PING, b"?"),
+        websocket.encode_frame(websocket.OPCODE_BINARY, b"\x00\x01"),
+        b"\x01\x03one" + websocket.encode_frame(websocket.OPCODE_PING) + b"\x80\x03two",
+    ]
+    received = []
+    connection = WebSocket(serve_messages(frames), on_message=received.append)
+    with connection:
+        connection.send_text("hi")
+        wait_for(lambda: len(received) == 4)
+    assert received == ["hello", b"\x00\x01", "onetwo", "echo hi"]
+
+
+def test_sending_after_the_end():
+    connection = WebSocket(serve_messages([]))
+    connection.open()
+    connection.close()
+    with pytest.raises(WebSocketError, match="closed"):
+        connection.send_text("late")

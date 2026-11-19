@@ -29,18 +29,15 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import pathlib
-import re
-import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from koidaemon import commands, keys
-from koidaemon.backends.base import Backend, Settings, Snapshot
+from koidaemon.backends.base import Backend, Settings, Snapshot, tls_context
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
-from koidaemon.uploads import DiskImage, UploadError
+from koidaemon.uploads import MIN_CD_SIZE, DiskImage, UploadError, image_name
 from koidaemon.websocket import WebSocket, WebSocketError
 
 LOG = logging.getLogger(__name__)
@@ -62,14 +59,6 @@ RELEASE_SETTLE = 0.25
 # often to look.
 VIDEO_WAIT = 10.0
 VIDEO_POLL_INTERVAL = 0.25
-
-# Uploaded images are named after their contents, so an image that is
-# already on the PiKVM is not uploaded again.
-IMAGE_PREFIX = "koid-"
-
-# Linux's USB mass storage gadget will not present a CD smaller than 300
-# sectors of 2048 bytes; kvmd then fails with a bare HTTP 500.
-MIN_CD_SIZE = 300 * 2048
 
 # How long kvmd may take to notice an uploaded image, and how often to look.
 IMAGE_WAIT = 10.0
@@ -111,12 +100,6 @@ def to_mouse_range(position: int, size: int) -> int:
     return MOUSE_MIN + round(position * (MOUSE_MAX - MOUSE_MIN) / (size - 1))
 
 
-def image_name(file_name: str, digest: str) -> str:
-    """The name an image is stored under on the PiKVM."""
-    safe = re.sub(r"[^A-Za-z0-9._-]", "_", file_name)
-    return "%s%s-%s" % (IMAGE_PREFIX, digest[:12], safe)
-
-
 class PiKVMBackend(Backend):
     name = "pikvm"
     capabilities = frozenset(commands.ALL_CAPABILITIES)
@@ -133,7 +116,7 @@ class PiKVMBackend(Backend):
         ca_file = settings.get_path("ca_file", None)
         verify_tls = settings.get_bool("verify_tls", True)
         settings.finish()
-        self._tls = self._tls_context(ca_file, verify_tls)
+        self._tls = tls_context(ca_file, verify_tls)
         # The last screen size seen, so that placing the pointer does not
         # need kvmd's streamer started for every move.
         self._screen: tuple[int, int] | None = None
@@ -143,21 +126,6 @@ class PiKVMBackend(Backend):
         # own WebSocket closes they are pressed again.
         self._held_keys: list[str] = []
         self._held_buttons: list[str] = []
-
-    @staticmethod
-    def _tls_context(ca_file: pathlib.Path | None, verify: bool) -> ssl.SSLContext:
-        if ca_file is not None:
-            context = ssl.create_default_context(cafile=str(ca_file))
-            # A PiKVM's own certificate names the device, which rarely
-            # matches the name it is reached by; trusting that one
-            # certificate is the check that matters.
-            context.check_hostname = False
-            return context
-        context = ssl.create_default_context()
-        if not verify:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        return context
 
     @property
     def resource(self) -> str:
@@ -466,6 +434,7 @@ class PiKVMBackend(Backend):
             pass
 
     def storage_insert(self, image: DiskImage, mode: str, writable: bool) -> dict:
+        # kvmd would fail with a bare HTTP 500.
         if mode == "cdrom" and image.size < MIN_CD_SIZE:
             raise InvalidRequest("%s is too small to be a CD: the PiKVM needs at least %d KiB"
                                  % (image.name, MIN_CD_SIZE // 1024))

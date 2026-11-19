@@ -30,6 +30,14 @@ from koidaemon.errors import BackendError, KoiError
 READ_CHUNK = 1024 * 1024
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
+# Images are stored on a KVM under a name made from their contents, so an
+# image that is already there is not uploaded again.
+IMAGE_PREFIX = "koid-"
+
+# Linux's USB mass storage gadget will not present a CD smaller than 300
+# sectors of 2048 bytes.
+MIN_CD_SIZE = 300 * 2048
+
 
 class UploadError(KoiError):
     """A pushed image did not arrive whole and as described."""
@@ -48,6 +56,12 @@ class SendImage(Exception):
     def __init__(self, size: int) -> None:
         super().__init__("send %d bytes" % size)
         self.size = size
+
+
+def image_name(file_name: str, digest: str) -> str:
+    """The name an image is stored under on a KVM."""
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", file_name)
+    return "%s%s-%s" % (IMAGE_PREFIX, digest[:12], safe)
 
 
 def file_digest(path: pathlib.Path) -> str:

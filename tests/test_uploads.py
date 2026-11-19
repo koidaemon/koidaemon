@@ -8,7 +8,7 @@ import io
 import pytest
 
 from koidaemon.errors import BackendError
-from koidaemon.uploads import CheckedReader, LocalImage, UploadError, file_digest
+from koidaemon.uploads import CheckedReader, LocalImage, UploadError, file_digest, image_name
 
 
 def digest(data: bytes) -> str:
@@ -77,3 +77,8 @@ def test_drain_reads_what_is_left():
     reader.drain()
     assert reader.finished
     assert stream.read() == b"next"
+
+
+def test_image_names_are_safe():
+    name = image_name("My Disk (1).iso", "abcdef0123456789")
+    assert name == "koid-abcdef012345-My_Disk__1_.iso"

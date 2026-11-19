@@ -154,4 +154,4 @@ def test_example_configuration_is_valid(tmp_path):
     text = text.replace("/run/secrets/pikvm-b", str(tmp_path / "pikvm.secret"))
     text = text.replace('ca_file = "pikvm-b.pem"', "")
     loaded = config.load(write_config(tmp_path, text))
-    assert sorted(loaded.targets) == ["board-a", "board-b"]
+    assert sorted(loaded.targets) == ["board-a", "board-b", "board-c"]

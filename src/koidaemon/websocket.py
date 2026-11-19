@@ -2,12 +2,14 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Just enough of a WebSocket client (RFC 6455) to stay connected.
+"""Just enough of a WebSocket client (RFC 6455) to stay connected, and to
+pass a few messages.
 
 kvmd only runs its video streamer while a client is connected to its
-WebSocket, so the pikvm backend holds one open while it needs video.  This
-client never sends data: it answers pings, so the server does not drop it,
-and throws away everything else the server sends.
+WebSocket, so the pikvm backend holds one open while it needs video; a
+JetKVM sets up its WebRTC session over one.  This client answers pings, so
+the server does not drop it, hands whole messages to on_message, and sends
+text messages.
 """
 
 from __future__ import annotations
@@ -20,10 +22,14 @@ import ssl
 import struct
 import threading
 import urllib.parse
+from typing import Callable
 
 # From RFC 6455, section 1.3.
 ACCEPT_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+OPCODE_CONTINUATION = 0x0
+OPCODE_TEXT = 0x1
+OPCODE_BINARY = 0x2
 OPCODE_CLOSE = 0x8
 OPCODE_PING = 0x9
 OPCODE_PONG = 0xA
@@ -67,6 +73,11 @@ def encode_frame(opcode: int, payload: bytes = b"", mask: bytes | None = None) -
 
 def read_frame(stream) -> tuple[int, bytes]:
     """Read one frame from a file-like stream: (opcode, payload)."""
+    _final, opcode, payload = _read_frame(stream)
+    return opcode, payload
+
+
+def _read_frame(stream) -> tuple[bool, int, bytes]:
     first, second = _read_exactly(stream, 2)
     opcode = first & 0x0F
     length = second & 0x7F
@@ -78,7 +89,7 @@ def read_frame(stream) -> tuple[int, bytes]:
     payload = _read_exactly(stream, length)
     if mask is not None:
         payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return opcode, payload
+    return bool(first & 0x80), opcode, payload
 
 
 def _read_exactly(stream, size: int) -> bytes:
@@ -96,11 +107,15 @@ class WebSocket:
     """
 
     def __init__(self, url: str, headers: dict | None = None,
-                 tls: ssl.SSLContext | None = None, timeout: float = 30.0) -> None:
+                 tls: ssl.SSLContext | None = None, timeout: float = 30.0,
+                 on_message: Callable[[str | bytes], None] | None = None) -> None:
         self.url = url
         self.headers = headers or {}
         self.tls = tls
         self.timeout = timeout
+        # Called from the reader thread with each text (str) or binary
+        # (bytes) message.
+        self.on_message = on_message
         self._socket = None
         self._stream = None
         self._thread = None
@@ -183,19 +198,39 @@ class WebSocket:
             headers[name.strip().lower()] = value.strip()
         return int(fields[1]), headers
 
+    def send_text(self, text: str) -> None:
+        try:
+            self._send(OPCODE_TEXT, text.encode())
+        except (OSError, AttributeError) as error:
+            raise WebSocketError("the connection closed") from error
+
     def _send(self, opcode: int, payload: bytes = b"") -> None:
         frame = encode_frame(opcode, payload, mask=os.urandom(4))
         with self._send_lock:
             self._socket.sendall(frame)
 
     def _read_frames(self) -> None:
+        # A message may come in fragments: a text or binary frame, then
+        # continuation frames up to the final one.
+        kind, parts = None, []
         try:
             while True:
-                opcode, payload = read_frame(self._stream)
+                final, opcode, payload = _read_frame(self._stream)
                 if opcode == OPCODE_PING:
                     self._send(OPCODE_PONG, payload)
                 elif opcode == OPCODE_CLOSE:
                     return
+                elif opcode in (OPCODE_TEXT, OPCODE_BINARY, OPCODE_CONTINUATION):
+                    if opcode != OPCODE_CONTINUATION:
+                        kind, parts = opcode, []
+                    parts.append(payload)
+                    if final and kind is not None:
+                        message = b"".join(parts)
+                        if kind == OPCODE_TEXT:
+                            message = message.decode()
+                        kind, parts = None, []
+                        if self.on_message is not None:
+                            self.on_message(message)
         except (OSError, ValueError, WebSocketError):
             # The connection closed, from either end.
             return
