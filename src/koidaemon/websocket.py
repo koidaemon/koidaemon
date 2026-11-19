@@ -2,12 +2,14 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Just enough of a WebSocket client (RFC 6455) to stay connected.
+"""Just enough of a WebSocket client (RFC 6455).
 
 kvmd only runs its video streamer while a client is connected to its
-WebSocket, so the pikvm backend holds one open while it needs video.  This
-client never sends data: it answers pings, so the server does not drop it,
-and throws away everything else the server sends.
+WebSocket, so the pikvm backend holds one open while it needs video; it
+sends nothing, and the client answers pings and throws away everything
+else the server sends.  The linkr backend uploads disk images as binary
+messages, and asks the client to keep what the server sends for it to
+read.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import queue
 import socket
 import ssl
 import struct
@@ -24,6 +27,9 @@ import urllib.parse
 # From RFC 6455, section 1.3.
 ACCEPT_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+OPCODE_CONTINUATION = 0x0
+OPCODE_TEXT = 0x1
+OPCODE_BINARY = 0x2
 OPCODE_CLOSE = 0x8
 OPCODE_PING = 0x9
 OPCODE_PONG = 0xA
@@ -48,6 +54,17 @@ def accept_key(key: str) -> str:
     return base64.b64encode(digest).decode()
 
 
+def apply_mask(payload: bytes, mask: bytes) -> bytes:
+    """XOR payload with the 4-byte mask repeated, as one big integer, which
+    is far quicker than byte by byte for megabytes of disk image."""
+    if not payload:
+        return payload
+    length = len(payload)
+    repeated = (mask * (length // 4 + 1))[:length]
+    value = int.from_bytes(payload, "big") ^ int.from_bytes(repeated, "big")
+    return value.to_bytes(length, "big")
+
+
 def encode_frame(opcode: int, payload: bytes = b"", mask: bytes | None = None) -> bytes:
     """One final frame.  Clients must mask what they send; servers must not."""
     first = 0x80 | opcode
@@ -61,13 +78,19 @@ def encode_frame(opcode: int, payload: bytes = b"", mask: bytes | None = None) -
         header = struct.pack(">BBQ", first, mask_bit | 127, length)
     if mask is None:
         return header + payload
-    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return header + mask + masked
+    return header + mask + apply_mask(payload, mask)
 
 
 def read_frame(stream) -> tuple[int, bytes]:
     """Read one frame from a file-like stream: (opcode, payload)."""
+    _final, opcode, payload = read_frame_parts(stream)
+    return opcode, payload
+
+
+def read_frame_parts(stream) -> tuple[bool, int, bytes]:
+    """Read one frame: (whether it ends its message, opcode, payload)."""
     first, second = _read_exactly(stream, 2)
+    final = bool(first & 0x80)
     opcode = first & 0x0F
     length = second & 0x7F
     if length == 126:
@@ -77,8 +100,8 @@ def read_frame(stream) -> tuple[int, bytes]:
     mask = _read_exactly(stream, 4) if second & 0x80 else None
     payload = _read_exactly(stream, length)
     if mask is not None:
-        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
-    return opcode, payload
+        payload = apply_mask(payload, mask)
+    return final, opcode, payload
 
 
 def _read_exactly(stream, size: int) -> bytes:
@@ -92,15 +115,20 @@ class WebSocket:
     """A WebSocket connection, kept alive by a background thread.
 
     Use it as a context manager: the connection is open inside the block
-    and closed when it ends.
+    and closed when it ends.  With keep_messages, text and binary messages
+    from the server are kept for receive(); otherwise they are dropped.
     """
 
     def __init__(self, url: str, headers: dict | None = None,
-                 tls: ssl.SSLContext | None = None, timeout: float = 30.0) -> None:
+                 tls: ssl.SSLContext | None = None, timeout: float = 30.0,
+                 keep_messages: bool = False) -> None:
         self.url = url
         self.headers = headers or {}
         self.tls = tls
         self.timeout = timeout
+        self.keep_messages = keep_messages
+        # Whole messages from the server, then None once it has gone.
+        self._messages: queue.Queue = queue.Queue()
         self._socket = None
         self._stream = None
         self._thread = None
@@ -188,18 +216,48 @@ class WebSocket:
         with self._send_lock:
             self._socket.sendall(frame)
 
+    def send_binary(self, data: bytes) -> None:
+        """Send one binary message."""
+        try:
+            self._send(OPCODE_BINARY, data)
+        except OSError as error:
+            raise WebSocketError("cannot send: %s" % error) from error
+
+    def receive(self, timeout: float | None = None) -> bytes:
+        """The next text or binary message the server sent (text as UTF-8
+        bytes), waiting up to timeout seconds.  Needs keep_messages."""
+        try:
+            message = self._messages.get(timeout=self.timeout if timeout is None else timeout)
+        except queue.Empty:
+            raise WebSocketError("the server sent nothing for %g seconds"
+                                 % (self.timeout if timeout is None else timeout)) from None
+        if message is None:
+            # Leave the marker for anyone else waiting.
+            self._messages.put(None)
+            raise WebSocketError("the connection closed")
+        return message
+
     def _read_frames(self) -> None:
+        parts: list[bytes] = []
         try:
             while True:
-                opcode, payload = read_frame(self._stream)
+                final, opcode, payload = read_frame_parts(self._stream)
                 if opcode == OPCODE_PING:
                     self._send(OPCODE_PONG, payload)
                 elif opcode == OPCODE_CLOSE:
                     return
+                elif opcode in (OPCODE_TEXT, OPCODE_BINARY, OPCODE_CONTINUATION):
+                    if not self.keep_messages:
+                        continue
+                    parts.append(payload)
+                    if final:
+                        self._messages.put(b"".join(parts))
+                        parts = []
         except (OSError, ValueError, WebSocketError):
             # The connection closed, from either end.
             return
         finally:
+            self._messages.put(None)
             self._server_closed.set()
 
     def close(self) -> None:

@@ -184,3 +184,76 @@ def test_close_gives_up_on_a_silent_server(monkeypatch):
     start = time.monotonic()
     connection.close()
     assert time.monotonic() - start < 0.9
+
+
+@pytest.mark.parametrize("length", [0, 1, 3, 4, 5, 1000, 2 * 1024 * 1024 + 3])
+def test_apply_mask_matches_byte_by_byte(length):
+    payload = bytes(index % 253 for index in range(length))
+    mask = b"\x9a\x01\xff\x42"
+    expected = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    assert websocket.apply_mask(payload, mask) == expected
+
+
+def test_frames_say_whether_they_end_a_message():
+    frame = websocket.encode_frame(websocket.OPCODE_BINARY, b"abc")
+    assert websocket.read_frame_parts(io.BytesIO(frame)) == (True, websocket.OPCODE_BINARY, b"abc")
+    unfinished = bytes([frame[0] & 0x7F]) + frame[1:]
+    assert websocket.read_frame_parts(io.BytesIO(unfinished))[0] is False
+
+
+def serve_echo():
+    """A WebSocket server for one client that answers each binary message
+    with its reverse, split over two frames, until the client closes."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        connection, _ = listener.accept()
+        with connection:
+            stream = connection.makefile("rb")
+            key = None
+            while True:
+                line = stream.readline().decode()
+                if line.lower().startswith("sec-websocket-key:"):
+                    key = line.split(":", 1)[1].strip()
+                if line in ("\r\n", ""):
+                    break
+            connection.sendall(("HTTP/1.1 101 Switching Protocols\r\n"
+                                "Sec-WebSocket-Accept: %s\r\n\r\n"
+                                % websocket.accept_key(key)).encode())
+            while True:
+                opcode, payload = websocket.read_frame(stream)
+                if opcode == websocket.OPCODE_CLOSE:
+                    connection.sendall(websocket.encode_frame(websocket.OPCODE_CLOSE, payload))
+                    break
+                reply = payload[::-1]
+                half = len(reply) // 2
+                first = websocket.encode_frame(websocket.OPCODE_BINARY, reply[:half])
+                connection.sendall(bytes([first[0] & 0x7F]) + first[1:])
+                connection.sendall(websocket.encode_frame(websocket.OPCODE_CONTINUATION,
+                                                          reply[half:]))
+        listener.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return "ws://127.0.0.1:%d/" % listener.getsockname()[1]
+
+
+def test_binary_messages_both_ways():
+    payload = bytes(range(256)) * 300
+    with WebSocket(serve_echo(), keep_messages=True) as connection:
+        connection.send_binary(payload)
+        assert connection.receive(timeout=5) == payload[::-1]
+
+
+def test_receive_times_out():
+    with WebSocket(serve_echo(), keep_messages=True) as connection:
+        with pytest.raises(WebSocketError, match="sent nothing"):
+            connection.receive(timeout=0.1)
+
+
+def test_messages_are_dropped_unless_kept():
+    with WebSocket(serve_echo()) as connection:
+        connection.send_binary(b"abc")
+        with pytest.raises(WebSocketError, match="sent nothing"):
+            connection.receive(timeout=0.3)

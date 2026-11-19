@@ -31,13 +31,13 @@ import json
 import logging
 import pathlib
 import re
-import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
-from koidaemon import commands, keys
+from koidaemon import commands, keys, tls
+from koidaemon.images import jpeg_size
 from koidaemon.backends.base import Backend, Settings, Snapshot
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
 from koidaemon.uploads import DiskImage, UploadError
@@ -80,26 +80,6 @@ class _Unavailable(BackendError):
     """kvmd answered 503: what was asked for is not ready, such as video."""
 
 
-def jpeg_size(data: bytes) -> tuple[int, int] | None:
-    """Width and height from a JPEG's frame header, or None if not found."""
-    if data[:2] != b"\xff\xd8":
-        return None
-    offset = 2
-    while offset + 4 <= len(data):
-        if data[offset] != 0xFF:
-            return None
-        marker = data[offset + 1]
-        length = int.from_bytes(data[offset + 2:offset + 4], "big")
-        # The start-of-frame markers are C0-CF, except C4 (Huffman tables),
-        # C8 (reserved) and CC (arithmetic coding).
-        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-            height = int.from_bytes(data[offset + 5:offset + 7], "big")
-            width = int.from_bytes(data[offset + 7:offset + 9], "big")
-            return width, height
-        offset += 2 + length
-    return None
-
-
 def to_mouse_range(position: int, size: int) -> int:
     """Scale a pixel position on a screen of this size to kvmd's range.
 
@@ -133,7 +113,7 @@ class PiKVMBackend(Backend):
         ca_file = settings.get_path("ca_file", None)
         verify_tls = settings.get_bool("verify_tls", True)
         settings.finish()
-        self._tls = self._tls_context(ca_file, verify_tls)
+        self._tls = tls.client_context(ca_file, verify_tls)
         # The last screen size seen, so that placing the pointer does not
         # need kvmd's streamer started for every move.
         self._screen: tuple[int, int] | None = None
@@ -143,21 +123,6 @@ class PiKVMBackend(Backend):
         # own WebSocket closes they are pressed again.
         self._held_keys: list[str] = []
         self._held_buttons: list[str] = []
-
-    @staticmethod
-    def _tls_context(ca_file: pathlib.Path | None, verify: bool) -> ssl.SSLContext:
-        if ca_file is not None:
-            context = ssl.create_default_context(cafile=str(ca_file))
-            # A PiKVM's own certificate names the device, which rarely
-            # matches the name it is reached by; trusting that one
-            # certificate is the check that matters.
-            context.check_hostname = False
-            return context
-        context = ssl.create_default_context()
-        if not verify:
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-        return context
 
     @property
     def resource(self) -> str:

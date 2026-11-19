@@ -152,6 +152,9 @@ def test_example_configuration_is_valid(tmp_path):
     # Point the example's secrets at files that exist here.
     text = text.replace("/run/secrets/raritan", str(tmp_path / "raritan.secret"))
     text = text.replace("/run/secrets/pikvm-b", str(tmp_path / "pikvm.secret"))
+    text = text.replace("/run/secrets/linkr", str(tmp_path / "linkr.secret"))
+    (tmp_path / "linkr.secret").write_text("radxa_linkr_example\n")
     text = text.replace('ca_file = "pikvm-b.pem"', "")
+    text = text.replace('ca_file = "linkr.pem"', "")
     loaded = config.load(write_config(tmp_path, text))
-    assert sorted(loaded.targets) == ["board-a", "board-b"]
+    assert sorted(loaded.targets) == ["board-a", "board-b", "board-c", "board-d"]

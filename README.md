@@ -18,16 +18,25 @@ or a serial line, are meant to be supported too.
 
 | Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
+| [`linkr`](docs/linkr.md) | Radxa Linkr | yes | yes | JPEG | yes, always writable | no |
+| [`nanokvm-usb`](docs/nanokvm-usb.md) | Sipeed NanoKVM-USB, plugged into koid's machine | yes | yes | JPEG | no | no |
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
 
-What has been tested on real hardware so far:
+What has been tested on real hardware so far ([TESTING.md](TESTING.md)
+lists what has not):
 
 - **raritan-legacy:** keyboard and mouse, on a Dominion KX with firmware
   1.4.9.5.16 and a DCIM-USBG2; snapshots of a Linux text console and of
   test patterns at 640x480 and 800x600. These switches handle no
   widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
   for the resolutions that work.
+- **linkr:** USB storage only, on a Linkr with firmware 1.6.0 over USB-C
+  and a Linux laptop as the target; not yet the keyboard, mouse or
+  snapshots. See [docs/linkr.md](docs/linkr.md).
+- **nanokvm-usb:** snapshots and the keyboard, on a NanoKVM-USB in
+  front of a Radxa Dragon Q8B in its UEFI menus and shell; not yet the
+  mouse. See [docs/nanokvm-usb.md](docs/nanokvm-usb.md).
 - **pikvm:** every command, on a PiKVM V4 Mini with kvmd 4.61 and a
   board with a 1920x1080 Linux console. See [docs/pikvm.md](docs/pikvm.md)
   for how a target sees the USB drive.
@@ -40,6 +49,9 @@ Needs Python 3.11 or later.
 python3 -m venv .venv
 .venv/bin/pip install .
 ```
+
+The nanokvm-usb backend also needs GStreamer's `gst-launch-1.0` and
+its V4L2 source; see [docs/nanokvm-usb.md](docs/nanokvm-usb.md).
 
 It needs `cryptography`, for the raritan-legacy backend's SSL 3.0
 handshake, and Pillow, to convert snapshots between formats.
