@@ -38,6 +38,7 @@ import urllib.parse
 import urllib.request
 
 from koidaemon import commands, keys
+from koidaemon.images import jpeg_size
 from koidaemon.backends.base import Backend, Settings, Snapshot
 from koidaemon.errors import BackendError, ConfigError, InvalidRequest, Unsupported
 from koidaemon.uploads import DiskImage, UploadError
@@ -78,26 +79,6 @@ IMAGE_POLL_INTERVAL = 0.25
 
 class _Unavailable(BackendError):
     """kvmd answered 503: what was asked for is not ready, such as video."""
-
-
-def jpeg_size(data: bytes) -> tuple[int, int] | None:
-    """Width and height from a JPEG's frame header, or None if not found."""
-    if data[:2] != b"\xff\xd8":
-        return None
-    offset = 2
-    while offset + 4 <= len(data):
-        if data[offset] != 0xFF:
-            return None
-        marker = data[offset + 1]
-        length = int.from_bytes(data[offset + 2:offset + 4], "big")
-        # The start-of-frame markers are C0-CF, except C4 (Huffman tables),
-        # C8 (reserved) and CC (arithmetic coding).
-        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
-            height = int.from_bytes(data[offset + 5:offset + 7], "big")
-            width = int.from_bytes(data[offset + 7:offset + 9], "big")
-            return width, height
-        offset += 2 + length
-    return None
 
 
 def to_mouse_range(position: int, size: int) -> int:

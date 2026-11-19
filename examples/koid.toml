@@ -19,3 +19,9 @@ backend = "pikvm"
 url = "https://192.0.2.20"
 password_file = "/run/secrets/pikvm-b"
 ca_file = "pikvm-b.pem"
+
+# A board behind a NanoKVM-USB plugged into this machine.
+[targets.board-c]
+backend = "nanokvm-usb"
+serial = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_XXXXXXXXXX-if00"
+video = "/dev/v4l/by-id/usb-MACROSILICON_USB3_Video_XXXXXXXX-video-index0"
