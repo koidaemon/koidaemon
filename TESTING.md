@@ -42,6 +42,7 @@ access token (System Settings, Access Token).
 - [ ] `keyboard.press`, `.down`, `.up` with browser key codes, including
       ctrl+alt+delete
 - [ ] `mouse.move` and clicks land where they should
-- [ ] `mouse.scroll`: does a positive `wheelV` scroll up?
+- [ ] `mouse.scroll`: does a positive `wheelV` scroll down, as Radxa's
+      own client says?
 - [ ] Whether the private API behind the web interface could give USB
       storage (virtual media), which the public API lacks

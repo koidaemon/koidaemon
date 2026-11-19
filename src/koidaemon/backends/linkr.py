@@ -226,12 +226,14 @@ class LinkrBackend(Backend):
         self._control([self._mouse_event()])
 
     def mouse_scroll(self, notches: int) -> None:
-        # Positive scrolls up, as with a USB wheel.
+        # koid's positive notches scroll up, as with a USB wheel; the
+        # Linkr's wheelV scrolls down when positive, as Radxa's own client
+        # (radxa-linkr/linkr-skills) documents it.
         events = []
         remaining = notches
         while remaining:
             step = max(-MAX_WHEEL_STEP, min(MAX_WHEEL_STEP, remaining))
-            events.append(self._mouse_event(step))
+            events.append(self._mouse_event(-step))
             remaining -= step
         self._control(events)
 

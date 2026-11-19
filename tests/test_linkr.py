@@ -195,8 +195,11 @@ def test_down_and_up_buttons(device, backend):
 
 
 def test_scroll(device, backend):
+    # koid scrolls up for positive notches; the Linkr scrolls down for
+    # positive wheelV.
     backend.mouse_scroll(-45)
+    backend.mouse_scroll(3)
     assert device.controls == [[
-        ["mouse_abs", 0, 0.0, 0.0, -20, 0], ["mouse_abs", 0, 0.0, 0.0, -20, 0],
-        ["mouse_abs", 0, 0.0, 0.0, -5, 0],
-    ]]
+        ["mouse_abs", 0, 0.0, 0.0, 20, 0], ["mouse_abs", 0, 0.0, 0.0, 20, 0],
+        ["mouse_abs", 0, 0.0, 0.0, 5, 0],
+    ], [["mouse_abs", 0, 0.0, 0.0, -3, 0]]]

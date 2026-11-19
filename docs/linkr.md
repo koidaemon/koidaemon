@@ -41,7 +41,7 @@ Every request carries `Authorization: token TOKEN`.
 | `snapshot` | `GET /api/public/snapshot` |
 | `keyboard.type` | `["text", ...]` events of at most 30 characters, with `["delay", 1000]` between them |
 | `keyboard.press`, `.down`, `.up` | `["keyboard", code, pressed]`, with browser key codes |
-| `mouse.*` | `["mouse_abs", buttons, x, y, wheel, 0]`, with x and y from 0 to 1 |
+| `mouse.*` | `["mouse_abs", buttons, x, y, wheel, 0]`, with x and y from 0 to 1, and a wheel step of at most 20 that scrolls down when positive (the opposite of koid's notches) |
 
 Every event goes to `POST /api/public/control` as `{"events": [...]}`.
 Radxa advise a pause of about a second after every 30 or so characters
