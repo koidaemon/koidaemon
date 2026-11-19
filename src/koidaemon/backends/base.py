@@ -19,6 +19,7 @@ here raise Unsupported in case they are.
 from __future__ import annotations
 
 import pathlib
+import ssl
 from dataclasses import dataclass
 
 from koidaemon.errors import ConfigError, Unsupported
@@ -106,6 +107,23 @@ class Settings:
         if self._values:
             raise ConfigError("%s: unknown settings %s"
                               % (self.where, ", ".join(sorted(self._values))))
+
+
+def tls_context(ca_file: pathlib.Path | None, verify: bool) -> ssl.SSLContext:
+    """How to check a KVM's certificate: against ca_file, the system's
+    certificates, or not at all."""
+    if ca_file is not None:
+        context = ssl.create_default_context(cafile=str(ca_file))
+        # A KVM's own certificate names the device, which rarely matches
+        # the name it is reached by; trusting that one certificate is the
+        # check that matters.
+        context.check_hostname = False
+        return context
+    context = ssl.create_default_context()
+    if not verify:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    return context
 
 
 class Backend:
