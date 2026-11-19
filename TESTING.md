@@ -47,7 +47,9 @@ access token (System Settings, Access Token).
 - [x] USB storage over the private API (docs/linkr.md): login, list,
       space, upload over `/ws`, mount, unmount and delete, with a 4 MiB
       image and nothing on the Linkr's USB side
-- [ ] How a target sees a mounted image: stick or CD, writable or not,
-      and whether `ums` in `/api/virtual/device` turns on
+- [x] How a target sees a mounted image: a writable removable disk,
+      never a CD (see docs/linkr.md)
+- [ ] Why a mount sent straight after an unmount took about 90 seconds
+      to reach the target, and how long koid should wait
 - [ ] Uploading a full-size ISO: speed, and resuming an interrupted
       upload from `NextChunkIndex`

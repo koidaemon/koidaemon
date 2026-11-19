@@ -94,9 +94,25 @@ stick, and no read-only setting. Each of these answers `{"code": 0,
 "data": {}}` on success. The list's `md5` is empty even for an image
 uploaded with one, so it cannot say whether an image is already there.
 
-With nothing on the Linkr's USB side, `mounted` named the image but
-`ums` stayed false; whether `ums` turns on once a target is connected has
-not been seen yet.
+**How the target sees it**, tried with a Linux laptop as the target:
+
+- The Linkr is one USB 2.0 device, "Radxa Linkr USB Gadget" (`1d6b:0104`),
+  with three HID interfaces for the keyboard and mouse and, while an
+  image is mounted, a mass storage interface.
+- A mounted image is a removable disk ("Linkr Virtual Media", SCSI type
+  0), never a CD, and the target can write to it: writes reach the image
+  stored on the Linkr and are still there after unmounting and mounting
+  again. There is no read-only setting.
+- Mounting and unmounting re-plug the whole gadget, keyboard and mouse
+  included: the target sees the Linkr disconnect and come back about two
+  seconds later, so anything held down is released.
+- The first mount after the Linkr started showed up on the target in two
+  seconds; a mount sent straight after an unmount took about 90. koid
+  should wait for the disk rather than assume it is there.
+- `ums` in `/api/virtual/device` stayed false throughout, image mounted
+  or not, so it says nothing about the virtual disk.
+- The Linkr's clock went back to 2021 when it restarted, so `mod_time`
+  in the list cannot be trusted.
 
 **Uploading** goes over the WebSocket at `/ws`, as protobuf `WsMessage`
 messages. Each carries the JWT in its `Token` field (2), a
