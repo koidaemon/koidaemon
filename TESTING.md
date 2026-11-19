@@ -44,5 +44,14 @@ access token (System Settings, Access Token).
 - [ ] `mouse.move` and clicks land where they should
 - [ ] `mouse.scroll`: does a positive `wheelV` scroll down, as Radxa's
       own client says?
-- [ ] Whether the private API behind the web interface could give USB
-      storage (virtual media), which the public API lacks
+- [ ] USB storage (virtual media). The public API has none, but the
+      device's web interface can upload, mount, unmount and delete .iso
+      and .img images, which the target sees as a USB drive. It does this
+      through the device's private API, whose login Radxa's own
+      harness-linkr documents: `POST /api/account/login` with
+      `{"username", "passwd": sha256("RADXA_FIXED_SALT_v1" + password)}`,
+      answered with a JWT for `Authorization: Bearer ...`. The virtual
+      disk endpoints themselves are not documented anywhere public; find
+      them in the web interface's JavaScript, read from a live Linkr or
+      from the firmware image (linkr-ota-1.6.0.bin). Then check whether
+      images can be presented as a CD as well as a stick, and read-only.
