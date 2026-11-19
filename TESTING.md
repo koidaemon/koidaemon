@@ -22,3 +22,26 @@ UEFI menus and shell.
       running at a different resolution from the capture size
 - [ ] Whether the 50 ms `key_interval` is needed once Linux is running,
       or only in UEFI
+
+## linkr
+
+Nothing tried yet: the Linkr did not come up over USB-C (the host saw a
+"Realtek Linkr USB LAN" adapter but received no packets and got no DHCP
+lease). Before testing, it needs first-time setup in linkr.now and an
+access token (System Settings, Access Token).
+
+- [ ] Reaching the Linkr at all, over USB-C or Ethernet, and over HTTPS
+      with its certificate as `ca_file`
+- [ ] The access token: accepted, and a wrong one refused with 403
+- [ ] `status`: does an empty list of events to `/api/public/control`
+      work as a cheap check, or does the Linkr refuse it?
+- [ ] `snapshot`: JPEG, and the size koid reads from it
+- [ ] `keyboard.type`: text, Enter and tab; long text over several
+      requests arrives in order (does a request wait for its events to
+      finish, or return at once?)
+- [ ] `keyboard.press`, `.down`, `.up` with browser key codes, including
+      ctrl+alt+delete
+- [ ] `mouse.move` and clicks land where they should
+- [ ] `mouse.scroll`: does a positive `wheelV` scroll up?
+- [ ] Whether the private API behind the web interface could give USB
+      storage (virtual media), which the public API lacks
