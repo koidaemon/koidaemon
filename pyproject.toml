@@ -16,6 +16,8 @@ dependencies = ["cryptography", "pillow"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+# WebRTC for the jetkvm backend: big, so only installed on request.
+jetkvm = ["aiortc", "av"]
 
 [project.scripts]
 koid = "koidaemon.cli:koid"

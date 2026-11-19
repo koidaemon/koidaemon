@@ -18,6 +18,7 @@ or a serial line, are meant to be supported too.
 
 | Backend | Devices | Keyboard | Mouse | KVM sends snapshots as | USB stick | USB CD |
 |---|---|---|---|---|---|---|
+| [`jetkvm`](docs/jetkvm.md) | JetKVM | yes | yes | PNG (koid decodes H.264) | no | no |
 | [`pikvm`](docs/pikvm.md) | PiKVM, and devices running its kvmd | yes | yes | JPEG | yes | yes |
 | [`raritan-legacy`](docs/raritan-legacy.md) | first-generation Raritan Dominion KX | yes | yes | PNG | no | no |
 
@@ -28,6 +29,9 @@ What has been tested on real hardware so far:
   test patterns at 640x480 and 800x600. These switches handle no
   widescreen modes; see [docs/raritan-legacy.md](docs/raritan-legacy.md)
   for the resolutions that work.
+- **jetkvm:** `status` and `snapshot`, on a JetKVM with firmware 0.5.10
+  and a board with a 1920x1080 Linux console; the other commands
+  against a fake JetKVM. See [docs/jetkvm.md](docs/jetkvm.md).
 - **pikvm:** every command, on a PiKVM V4 Mini with kvmd 4.61 and a
   board with a 1920x1080 Linux console. See [docs/pikvm.md](docs/pikvm.md)
   for how a target sees the USB drive.
@@ -43,6 +47,9 @@ python3 -m venv .venv
 
 It needs `cryptography`, for the raritan-legacy backend's SSL 3.0
 handshake, and Pillow, to convert snapshots between formats.
+
+The jetkvm backend also needs aiortc and PyAV, for WebRTC:
+`.venv/bin/pip install '.[jetkvm]'`.
 
 ## Configure
 
@@ -194,6 +201,9 @@ certificate for HTTPS.
   capture the traffic. See [docs/raritan-legacy.md](docs/raritan-legacy.md).
 - A PiKVM's certificate is self-signed; give it to koid as `ca_file`
   rather than turning verification off.
+- A JetKVM serves plain HTTP unless HTTPS is turned on in its
+  settings, and then with a self-signed certificate; give that to koid
+  as `ca_file`.
 
 ## Tests
 
@@ -204,6 +214,8 @@ certificate for HTTPS.
 
 No KVM is needed. The tests run the daemon, the HTTP API and koictl for
 real, against a recording backend; the pikvm backend against a fake kvmd;
+the jetkvm backend against a fake JetKVM, over real WebRTC, when aiortc
+and PyAV are installed;
 and the raritan-legacy backend against a fake switch, with protocol values
 recorded from Raritan's own client talking to a real one.
 

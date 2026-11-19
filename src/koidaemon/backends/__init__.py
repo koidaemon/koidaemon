@@ -15,6 +15,7 @@ from koidaemon.errors import ConfigError
 
 # Backend name -> "module:class".
 BACKENDS = {
+    "jetkvm": "koidaemon.backends.jetkvm:JetKVMBackend",
     "pikvm": "koidaemon.backends.pikvm:PiKVMBackend",
     "raritan-legacy": "koidaemon.backends.raritan_legacy:RaritanLegacyBackend",
 }
