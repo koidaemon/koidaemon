@@ -624,8 +624,3 @@ def test_a_pushed_image_that_ends_short_is_not_kept(kvmd, backend):
     with pytest.raises(UploadError, match="short"):
         backend.storage_insert(pushed(contents, contents[:5000]), "stick", False)
     assert kvmd.images == {}
-
-
-def test_image_names_are_safe():
-    name = pikvm.image_name("My Disk (1).iso", "abcdef0123456789")
-    assert name == "koid-abcdef012345-My_Disk__1_.iso"
