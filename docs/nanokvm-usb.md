@@ -85,6 +85,22 @@ arrow keys sent back to back, and some at 20 ms apart. So koid leaves
 `key_interval` (50 ms) after every report, which makes typing take about
 a tenth of a second a character. Raise it if keys still go missing.
 
-For a snapshot koid captures a few frames and keeps the last, since the
-MS2130's first frames after it is opened can be dark or torn. Starting
-GStreamer each time makes a snapshot take about a second.
+## Video
+
+koid only opens the capture device for a snapshot. Each one starts
+GStreamer, captures 5 frames as MJPEG at `width` x `height`, and keeps the
+last. That takes about 1.2 seconds. The first frame after the device is
+opened is often not a whole JPEG, so it cannot be used.
+
+**With no signal from the target**, such as while it is off, the MS2130
+still sends frames. They show a flat, very dark grey (7 out of 255 in
+every channel), all identical. So `snapshot` succeeds and returns that
+picture, where the pikvm backend fails with "no video signal". koid
+cannot tell this from a target showing a nearly black screen. Look at
+`status` instead: `usb_connected: false` usually means the target is off.
+
+`status` always reports the configured `width` and `height` as the video
+size. The MS2130 does not tell koid the target's own resolution; it
+scales whatever the target sends to the size koid asks for. This has only
+been tried with a target sending 1920x1080, the same as the capture
+size, so how other modes are scaled is not known yet.
